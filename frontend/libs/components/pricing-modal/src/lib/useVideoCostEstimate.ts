@@ -1,6 +1,10 @@
 import { useEffect } from "react";
 import { ModelPage } from "@storyteller/ui-model-selector";
-import { Model, VideoModel } from "@storyteller/model-list";
+import {
+  Model,
+  resolveVideoAspectRatioOption,
+  VideoModel,
+} from "@storyteller/model-list";
 import { GenerationProvider } from "@storyteller/api-enums";
 import { usePromptVideoStore } from "@storyteller/ui-promptbox";
 import {
@@ -43,8 +47,12 @@ export function useVideoCostEstimate(
     }
 
     const videoModel = selectedModel as VideoModel;
-    const commonAspectRatio = videoAspectRatioToCommonAspectRatio(
+    const resolvedAspectRatioOption = resolveVideoAspectRatioOption(
+      videoModel,
       aspectRatio,
+    );
+    const commonAspectRatio = videoAspectRatioToCommonAspectRatio(
+      resolvedAspectRatioOption?.textLabel ?? null,
       videoModel.sizeOptions,
     );
     const commonResolution = stringToCommonVideoResolution(resolution);
