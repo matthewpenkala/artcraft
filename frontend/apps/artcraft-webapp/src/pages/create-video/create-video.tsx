@@ -51,6 +51,10 @@ import {
   startVideoPolling,
 } from "./generate-video-api";
 import {
+  buildProbedTimedRefsToAdd,
+  buildProbedVideoRefsToAdd,
+} from "./reference-video-candidates";
+import {
   AspectRatioIcon,
   AutoIcon,
 } from "../create-image/components/AspectRatioIcon";
@@ -80,6 +84,7 @@ import {
 import { useSignupCta } from "../../components/signup-cta-modal";
 import { useInsufficientCredits } from "../../components/insufficient-credits-modal";
 import { toast } from "../../components/toast/toast";
+import { formatMediaDurationSeconds } from "@storyteller/common";
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -198,38 +203,31 @@ function buildSizePopoverItems(
 }
 
 // Caps candidate reference videos against the deck's slot and total-duration
-// limits, probing each file's duration when it isn't known yet. Rejections
-// toast per video. Shared by the library video picker and the "Send to
-// prompt" consume flow.
+// limits. Always probe the current URL: gallery duration metadata can be stale,
+// while generation measures the actual file. Rejections toast per video.
+// Shared by the library video picker and the "Send to prompt" consume flow.
 async function buildVideoRefsToAdd(
   candidates: RefVideo[],
   existing: RefVideo[],
   maxRefs: number,
   maxTotalDuration: number,
 ): Promise<RefVideo[]> {
-  const slots = Math.max(0, maxRefs - existing.length);
-  const picked = candidates.slice(0, slots);
-  const added: RefVideo[] = [];
-  let total = existing.reduce((sum, v) => sum + v.duration, 0);
-  for (const candidate of picked) {
-    const duration =
-      candidate.duration > 0
-        ? candidate.duration
-        : await getVideoDurationFromUrl(candidate.url);
-    if (duration <= 0) {
-      toast.error("Could not read video file");
-      continue;
-    }
-    if (total + duration > maxTotalDuration) {
+  return buildProbedVideoRefsToAdd(
+    candidates,
+    existing,
+    maxRefs,
+    maxTotalDuration,
+    getVideoDurationFromUrl,
+    (rejection) => {
+      if (rejection.reason === "unreadable") {
+        toast.error("Could not read video file");
+        return;
+      }
       toast.error(
-        `Video too long — max ${maxTotalDuration}s total (${maxTotalDuration - total}s remaining)`,
+        `Video too long — max ${maxTotalDuration}s total (${formatMediaDurationSeconds(rejection.remainingSeconds)}s remaining)`,
       );
-      continue;
-    }
-    total += duration;
-    added.push({ ...candidate, duration });
-  }
-  return added;
+    },
+  );
 }
 
 // Effective max duration for the active input mode. Some models (e.g. Grok)
@@ -561,14 +559,22 @@ export default function CreateVideo() {
   // Seedance 2.5 bill reference-video input seconds, and sending the
   // durations lets the quote match what generation will bill (generation
   // itself measures the real files server-side).
-  const totalInputVideoDurationMillis =
-    isReferenceMode && referenceVideos.length > 0
-      ? referenceVideos.reduce((sum, vid) => sum + vid.duration, 0) * 1000
-      : undefined;
-  const totalInputAudioDurationMillis =
-    isReferenceMode && referenceAudios.length > 0
-      ? referenceAudios.reduce((sum, aud) => sum + aud.duration, 0) * 1000
-      : undefined;
+  const referenceVideoDurationPairs = useMemo(
+    () =>
+      referenceVideos.map((video) => ({
+        mediaToken: video.mediaToken,
+        durationSeconds: video.duration,
+      })),
+    [referenceVideos],
+  );
+  const referenceAudioDurationPairs = useMemo(
+    () =>
+      referenceAudios.map((audio) => ({
+        mediaToken: audio.mediaToken,
+        durationSeconds: audio.duration,
+      })),
+    [referenceAudios],
+  );
 
   const estimatedCredits = useVideoCostEstimate({
     model: selectedModel?.model ?? "",
@@ -581,10 +587,13 @@ export default function CreateVideo() {
     hasEndFrame: !isReferenceMode && hasEndFrame && !!endFrameImage,
     isReferenceMode,
     referenceImageCount: isReferenceMode ? referenceImages.length : 0,
-    referenceVideoCount: isReferenceMode ? referenceVideos.length : 0,
+    referenceVideoDurationPairs: isReferenceMode
+      ? referenceVideoDurationPairs
+      : undefined,
+    referenceAudioDurationPairs: isReferenceMode
+      ? referenceAudioDurationPairs
+      : undefined,
     generateAudio: hasSound ? generateWithSound : undefined,
-    totalInputVideoDurationMillis,
-    totalInputAudioDurationMillis,
   });
 
   // Character @-mentions are driven by the model's capability flag (set by the
@@ -1129,37 +1138,31 @@ export default function CreateVideo() {
   const handleLibraryAudioSelect = useCallback(
     async (items: GalleryItem[]) => {
       setIsAudioRefPickerOpen(false);
-      const availableSlots = Math.max(0, maxAudioRefs - referenceAudios.length);
-      const picked = items.slice(0, availableSlots);
-
-      const added: RefAudio[] = [];
-      let total = referenceAudios.reduce((sum, a) => sum + a.duration, 0);
-      for (const item of picked) {
-        const url = item.fullImage;
-        if (!url) continue;
-        const duration =
-          item.durationMillis != null
-            ? Math.round(item.durationMillis / 1000)
-            : await getAudioDurationFromUrl(url);
-        if (duration <= 0) {
-          toast.error("Could not read audio file");
-          continue;
-        }
-        if (total + duration > maxAudioRefDurationTotal) {
-          toast.error(
-            `Audio too long — max ${maxAudioRefDurationTotal}s total (${maxAudioRefDurationTotal - total}s remaining)`,
-          );
-          continue;
-        }
-        total += duration;
-        added.push({
+      const candidates: RefAudio[] = items
+        .filter((item) => Boolean(item.fullImage))
+        .map((item) => ({
           id: Math.random().toString(36).substring(7),
-          url,
+          url: item.fullImage!,
           file: new File([], "library-audio"),
           mediaToken: item.id,
-          duration,
-        });
-      }
+          duration: 0,
+        }));
+      const added = await buildProbedTimedRefsToAdd(
+        candidates,
+        referenceAudios,
+        maxAudioRefs,
+        maxAudioRefDurationTotal,
+        getAudioDurationFromUrl,
+        (rejection) => {
+          if (rejection.reason === "unreadable") {
+            toast.error("Could not read audio file");
+            return;
+          }
+          toast.error(
+            `Audio too long — max ${maxAudioRefDurationTotal}s total (${formatMediaDurationSeconds(rejection.remainingSeconds)}s remaining)`,
+          );
+        },
+      );
       if (added.length > 0) {
         setReferenceAudios([...referenceAudios, ...added]);
       }
@@ -1249,9 +1252,6 @@ export default function CreateVideo() {
       inputMode,
       isReferenceMode,
     });
-    isGeneratingRef.current = true;
-    setIsGenerating(true);
-
     const startFrameToken =
       !isReferenceMode && supportsImagePrompts && referenceImages.length > 0
         ? referenceImages[0].mediaToken
@@ -1340,6 +1340,9 @@ export default function CreateVideo() {
       referenceCharacterTokens,
     };
     console.log("[generate-video] params", baseParams);
+
+    isGeneratingRef.current = true;
+    setIsGenerating(true);
 
     const modelLabel = selectedModel.full_name ?? selectedModel.model;
     const batchId = startBatch(

@@ -15,7 +15,10 @@ import { DynamicIcon } from "@storyteller/icons";
 import { RefImage, RefVideo, RefAudio } from "./promptStore";
 import { toast } from "@storyteller/ui-toaster";
 import { twMerge } from "tailwind-merge";
-import { UploaderStates } from "@storyteller/common";
+import {
+  UploaderStates,
+  formatMediaDurationSeconds,
+} from "@storyteller/common";
 import {
   AUDIO_FILE_ACCEPT,
   AUDIO_FILE_TYPE_ERROR,
@@ -131,7 +134,7 @@ const AudioRefTile = ({
         />
       </button>
       <div className="absolute bottom-0 left-0 right-0 flex items-center justify-center bg-black/70 py-0.5 text-[10px] font-bold text-white pointer-events-none">
-        #{index + 1} · {audio.duration}s
+        #{index + 1} · {formatMediaDurationSeconds(audio.duration)}s
       </div>
       <button
         onClick={(e) => {
@@ -1149,7 +1152,8 @@ export const ImagePromptRow = ({
                     </span>
                   </div>
                   <span className="text-[13px] text-base-fg/60">
-                    {totalVideoDuration}s / {maxVideoRefDuration}s max
+                    {formatMediaDurationSeconds(totalVideoDuration)}s /{" "}
+                    {maxVideoRefDuration}s max
                   </span>
                 </div>
                 <div className="flex gap-2 items-center">
@@ -1165,7 +1169,7 @@ export const ImagePromptRow = ({
                         className="h-full w-full object-cover"
                       />
                       <div className="absolute bottom-0 left-0 right-0 flex items-center justify-center bg-black/70 py-0.5 text-[10px] font-bold text-white">
-                        {video.duration}s
+                        {formatMediaDurationSeconds(video.duration)}s
                       </div>
                       <button
                         onClick={(e) => {
@@ -1257,7 +1261,8 @@ export const ImagePromptRow = ({
                       </span>
                     </div>
                     <span className="text-[13px] text-base-fg/60">
-                      {totalAudioDuration}s / {maxAudioRefDuration}s max
+                      {formatMediaDurationSeconds(totalAudioDuration)}s /{" "}
+                      {maxAudioRefDuration}s max
                     </span>
                   </div>
                 </div>

@@ -1,5 +1,9 @@
 import { MediaUploadApi } from "@storyteller/api";
-import { UploaderState, UploaderStates } from "@storyteller/common";
+import {
+  UploaderState,
+  UploaderStates,
+  probeMediaDurationFromFile,
+} from "@storyteller/common";
 
 export type UploadMediaFn = (args: {
   title: string;
@@ -74,31 +78,7 @@ export const uploadAudio: UploadMediaFn = async ({
 };
 
 export const getVideoDuration = (file: File): Promise<number> =>
-  new Promise((resolve) => {
-    const video = document.createElement("video");
-    video.preload = "metadata";
-    video.onloadedmetadata = () => {
-      URL.revokeObjectURL(video.src);
-      resolve(Math.round(video.duration));
-    };
-    video.onerror = () => {
-      URL.revokeObjectURL(video.src);
-      resolve(0);
-    };
-    video.src = URL.createObjectURL(file);
-  });
+  probeMediaDurationFromFile("video", file).then((duration) => duration ?? 0);
 
 export const getAudioDuration = (file: File): Promise<number> =>
-  new Promise((resolve) => {
-    const audio = document.createElement("audio");
-    audio.preload = "metadata";
-    audio.onloadedmetadata = () => {
-      URL.revokeObjectURL(audio.src);
-      resolve(Math.round(audio.duration));
-    };
-    audio.onerror = () => {
-      URL.revokeObjectURL(audio.src);
-      resolve(0);
-    };
-    audio.src = URL.createObjectURL(file);
-  });
+  probeMediaDurationFromFile("audio", file).then((duration) => duration ?? 0);

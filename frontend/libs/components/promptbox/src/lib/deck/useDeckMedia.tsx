@@ -2,7 +2,12 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { GalleryItem, GalleryModal } from "@storyteller/ui-gallery-modal";
 import { downloadFileFromUrl, type UploadMediaFn } from "@storyteller/api";
 import { toast } from "@storyteller/ui-toaster";
-import { UploaderStates } from "@storyteller/common";
+import {
+  UploaderStates,
+  mediaDurationLimitStatus,
+  probeMediaDurationFromFile,
+  probeMediaDurationFromUrl,
+} from "@storyteller/common";
 import {
   AUDIO_FILE_ACCEPT,
   AUDIO_FILE_TYPE_ERROR,
@@ -69,43 +74,17 @@ const videoLimitMessage = (maxVideos: number, maxTotalSec: number) =>
 const randomTitle = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).substring(2, 15)}`;
 
-const getVideoDurationFromSrc = (src: string): Promise<number> =>
-  new Promise((resolve) => {
-    const video = document.createElement("video");
-    video.preload = "metadata";
-    video.onloadedmetadata = () => resolve(Math.round(video.duration));
-    video.onerror = () => resolve(0);
-    video.src = src;
-  });
+const getVideoDurationFromSrc = (src: string): Promise<number | null> =>
+  probeMediaDurationFromUrl("video", src);
 
-const getVideoDuration = (file: File): Promise<number> => {
-  const src = URL.createObjectURL(file);
-  return getVideoDurationFromSrc(src).finally(() => URL.revokeObjectURL(src));
-};
+const getVideoDuration = (file: File): Promise<number | null> =>
+  probeMediaDurationFromFile("video", file);
 
-const getAudioDurationFromSrc = (src: string): Promise<number> =>
-  new Promise((resolve) => {
-    const audio = document.createElement("audio");
-    audio.preload = "metadata";
-    audio.onloadedmetadata = () => resolve(Math.round(audio.duration));
-    audio.onerror = () => resolve(0);
-    audio.src = src;
-  });
+const getAudioDurationFromSrc = (src: string): Promise<number | null> =>
+  probeMediaDurationFromUrl("audio", src);
 
-const getAudioDuration = (file: File): Promise<number> =>
-  new Promise((resolve) => {
-    const audio = document.createElement("audio");
-    audio.preload = "metadata";
-    audio.onloadedmetadata = () => {
-      URL.revokeObjectURL(audio.src);
-      resolve(Math.round(audio.duration));
-    };
-    audio.onerror = () => {
-      URL.revokeObjectURL(audio.src);
-      resolve(0);
-    };
-    audio.src = URL.createObjectURL(file);
-  });
+const getAudioDuration = (file: File): Promise<number | null> =>
+  probeMediaDurationFromFile("audio", file);
 
 /**
  * Headless upload/limits/library state machine for the reference deck.
@@ -319,9 +298,18 @@ export function useDeckMedia<
 
     for (const file of filesToProcess) {
       const duration = await getVideoDuration(file);
-      const currentTotal = committed.reduce((sum, v) => sum + v.duration, 0);
-
-      if (currentTotal + duration > maxVideoTotalSec) {
+      if (duration == null) {
+        toast.error("Could not read video duration", {
+          id: "video-ref-duration",
+        });
+        continue;
+      }
+      if (
+        mediaDurationLimitStatus(
+          [...committed.map((video) => video.duration), duration],
+          maxVideoTotalSec,
+        ) !== "within-limit"
+      ) {
         toast.error(`Total video duration cannot exceed ${maxVideoTotalSec}s`, {
           id: "video-ref-limit",
         });
@@ -394,12 +382,21 @@ export function useDeckMedia<
 
     for (const file of filesToProcess) {
       const duration = await getAudioDuration(file);
-      const currentTotal = referenceAudiosRef.current.reduce(
-        (sum, a) => sum + a.duration,
-        0,
-      );
-
-      if (currentTotal + duration > maxAudioTotalSec) {
+      if (duration == null) {
+        toast.error("Could not read audio duration", {
+          id: "audio-ref-duration",
+        });
+        continue;
+      }
+      if (
+        mediaDurationLimitStatus(
+          [
+            ...referenceAudiosRef.current.map((audio) => audio.duration),
+            duration,
+          ],
+          maxAudioTotalSec,
+        ) !== "within-limit"
+      ) {
         toast.error(`Total audio duration cannot exceed ${maxAudioTotalSec}s`);
         break;
       }
@@ -526,18 +523,35 @@ export function useDeckMedia<
         const durations = await Promise.all(
           itemsToProcess.map((item) => getVideoDurationFromSrc(item.fullImage)),
         );
+        const unreadableCount = durations.filter(
+          (duration) => duration == null,
+        ).length;
+        if (unreadableCount > 0) {
+          toast.error(
+            `Could not read ${unreadableCount} selected video${unreadableCount === 1 ? "" : "s"}`,
+            { id: "video-ref-duration" },
+          );
+        }
 
         const newVideos: TVideo[] = [];
-        let currentTotal = baseVideos.reduce((sum, v) => sum + v.duration, 0);
         let exceeded = false;
         for (let i = 0; i < itemsToProcess.length; i++) {
           const item = itemsToProcess[i]!;
           const duration = durations[i]!;
-          if (currentTotal + duration > maxVideoTotalSec) {
+          if (duration == null) continue;
+          if (
+            mediaDurationLimitStatus(
+              [
+                ...baseVideos.map((video) => video.duration),
+                ...newVideos.map((video) => video.duration),
+                duration,
+              ],
+              maxVideoTotalSec,
+            ) !== "within-limit"
+          ) {
             exceeded = true;
             break;
           }
-          currentTotal += duration;
           newVideos.push(
             asVideo({
               id: randomId(),
@@ -567,9 +581,12 @@ export function useDeckMedia<
       const baseAudios = [...referenceAudios];
       const availableSlots = Math.max(0, maxAudios - baseAudios.length);
       if (availableSlots <= 0) {
-        toast.error(`Max ${maxAudios} audio tracks / ${maxAudioTotalSec}s total`, {
-          id: "audio-ref-limit",
-        });
+        toast.error(
+          `Max ${maxAudios} audio tracks / ${maxAudioTotalSec}s total`,
+          {
+            id: "audio-ref-limit",
+          },
+        );
         handleGalleryClose();
         return;
       }
@@ -581,27 +598,40 @@ export function useDeckMedia<
 
       setIsProcessingGallery(true);
       try {
-        // Use the duration the list endpoint already knows; probe the file's
-        // metadata only when it doesn't.
+        // Generation measures the current file rather than trusting gallery
+        // metadata, so the quote must probe that same URL every time too.
         const durations = await Promise.all(
-          itemsToProcess.map((item) =>
-            item.durationMillis != null
-              ? Promise.resolve(Math.round(item.durationMillis / 1000))
-              : getAudioDurationFromSrc(item.fullImage),
-          ),
+          itemsToProcess.map((item) => getAudioDurationFromSrc(item.fullImage)),
         );
+        const unreadableCount = durations.filter(
+          (duration) => duration == null,
+        ).length;
+        if (unreadableCount > 0) {
+          toast.error(
+            `Could not read ${unreadableCount} selected audio file${unreadableCount === 1 ? "" : "s"}`,
+            { id: "audio-ref-duration" },
+          );
+        }
 
         const newAudios: TAudio[] = [];
-        let currentTotal = baseAudios.reduce((sum, a) => sum + a.duration, 0);
         let exceeded = false;
         for (let i = 0; i < itemsToProcess.length; i++) {
           const item = itemsToProcess[i]!;
           const duration = durations[i]!;
-          if (currentTotal + duration > maxAudioTotalSec) {
+          if (duration == null) continue;
+          if (
+            mediaDurationLimitStatus(
+              [
+                ...baseAudios.map((audio) => audio.duration),
+                ...newAudios.map((audio) => audio.duration),
+                duration,
+              ],
+              maxAudioTotalSec,
+            ) !== "within-limit"
+          ) {
             exceeded = true;
             break;
           }
-          currentTotal += duration;
           newAudios.push(
             asAudio({
               id: randomId(),

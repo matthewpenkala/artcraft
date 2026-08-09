@@ -283,7 +283,23 @@ export default function CreateVideo() {
 
   const lightbox = useLightboxNav(flatItems);
 
-  // Cost estimate
+  const referenceVideoDurationPairs = useMemo(
+    () =>
+      referenceVideos.map((video) => ({
+        mediaToken: video.mediaToken,
+        durationSeconds: video.duration,
+      })),
+    [referenceVideos],
+  );
+  const referenceAudioDurationPairs = useMemo(
+    () =>
+      referenceAudios.map((audio) => ({
+        mediaToken: audio.mediaToken,
+        durationSeconds: audio.duration,
+      })),
+    [referenceAudios],
+  );
+
   const estimatedCredits = useVideoCostEstimate({
     model: selectedModel?.model ?? "",
     aspectRatio: selectedSize,
@@ -294,6 +310,12 @@ export default function CreateVideo() {
     hasEndFrame: !isReferenceMode && hasEndFrame && !!endFrameImage,
     isReferenceMode,
     referenceImageCount: isReferenceMode ? referenceImages.length : 0,
+    referenceVideoDurationPairs: isReferenceMode
+      ? referenceVideoDurationPairs
+      : undefined,
+    referenceAudioDurationPairs: isReferenceMode
+      ? referenceAudioDurationPairs
+      : undefined,
     generateAudio: hasSound ? generateWithSound : undefined,
   });
 
@@ -691,9 +713,6 @@ export default function CreateVideo() {
       inputMode,
       isReferenceMode,
     });
-    isGeneratingRef.current = true;
-    setIsGenerating(true);
-
     const startFrameToken =
       !isReferenceMode && supportsImagePrompts && referenceImages.length > 0
         ? referenceImages[0].mediaToken
@@ -767,6 +786,9 @@ export default function CreateVideo() {
       referenceCharacterTokens,
     };
     console.log("[generate-video] params", baseParams);
+
+    isGeneratingRef.current = true;
+    setIsGenerating(true);
 
     const modelLabel = selectedModel.full_name ?? selectedModel.model;
     const batchId = startBatch(prompt, modelLabel, numVideos > 1 ? numVideos : undefined);

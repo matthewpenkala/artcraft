@@ -2,7 +2,14 @@ import { useCallback, useRef, useState } from "react";
 import { LoaderCircleIcon, MusicIcon, PlayIcon, SquareIcon, VideoIcon, XIcon } from "lucide-react";
 import { DynamicIcon } from "@storyteller/icons";
 import { twMerge } from "tailwind-merge";
-import { UploaderStates } from "@storyteller/common";
+import {
+  UploaderStates,
+  formatMediaDurationMillis,
+  formatMediaDurationSeconds,
+  mediaDurationLimitStatus,
+  remainingMediaDurationSeconds,
+  sumMediaDurationMillis,
+} from "@storyteller/common";
 import {
   AUDIO_FILE_ACCEPT,
   AUDIO_FILE_TYPE_ERROR,
@@ -54,22 +61,26 @@ export const MediaReferenceRow = ({
   const [uploadingVideo, setUploadingVideo] = useState(false);
   const [uploadingAudio, setUploadingAudio] = useState(false);
 
-  const totalVideoDuration = referenceVideos.reduce(
-    (sum, v) => sum + v.duration,
-    0,
+  const totalVideoDurationMillis = sumMediaDurationMillis(
+    referenceVideos.map((video) => video.duration),
   );
-  const totalAudioDuration = referenceAudios.reduce(
-    (sum, a) => sum + a.duration,
-    0,
+  const totalAudioDurationMillis = sumMediaDurationMillis(
+    referenceAudios.map((audio) => audio.duration),
   );
 
   const canAddVideo =
     referenceVideos.length < maxVideoCount &&
-    totalVideoDuration < maxVideoRefDuration &&
+    (remainingMediaDurationSeconds(
+      referenceVideos.map((video) => video.duration),
+      maxVideoRefDuration,
+    ) ?? 0) > 0 &&
     !uploadingVideo;
   const canAddAudio =
     referenceAudios.length < maxAudioCount &&
-    totalAudioDuration < maxAudioRefDuration &&
+    (remainingMediaDurationSeconds(
+      referenceAudios.map((audio) => audio.duration),
+      maxAudioRefDuration,
+    ) ?? 0) > 0 &&
     !uploadingAudio;
 
   const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -83,14 +94,22 @@ export const MediaReferenceRow = ({
     const file = files[0];
     const duration = await getVideoDuration(file);
 
-    if (duration <= 0) {
+    if (
+      mediaDurationLimitStatus([duration], Number.POSITIVE_INFINITY) !==
+      "within-limit"
+    ) {
       toast.error("Could not read video file");
       return;
     }
-    const currentTotal = baseVideos.reduce((sum, v) => sum + v.duration, 0);
-    if (currentTotal + duration > maxVideoRefDuration) {
+    const currentDurations = baseVideos.map((video) => video.duration);
+    if (
+      mediaDurationLimitStatus(
+        [...currentDurations, duration],
+        maxVideoRefDuration,
+      ) !== "within-limit"
+    ) {
       toast.error(
-        `Video too long — max ${maxVideoRefDuration}s total (${maxVideoRefDuration - currentTotal}s remaining)`,
+        `Video too long — max ${maxVideoRefDuration}s total (${formatMediaDurationSeconds(remainingMediaDurationSeconds(currentDurations, maxVideoRefDuration) ?? 0)}s remaining)`,
       );
       return;
     }
@@ -141,14 +160,22 @@ export const MediaReferenceRow = ({
     }
     const duration = await getAudioDuration(file);
 
-    if (duration <= 0) {
+    if (
+      mediaDurationLimitStatus([duration], Number.POSITIVE_INFINITY) !==
+      "within-limit"
+    ) {
       toast.error("Could not read audio file");
       return;
     }
-    const currentTotal = baseAudios.reduce((sum, a) => sum + a.duration, 0);
-    if (currentTotal + duration > maxAudioRefDuration) {
+    const currentDurations = baseAudios.map((audio) => audio.duration);
+    if (
+      mediaDurationLimitStatus(
+        [...currentDurations, duration],
+        maxAudioRefDuration,
+      ) !== "within-limit"
+    ) {
       toast.error(
-        `Audio too long — max ${maxAudioRefDuration}s total (${maxAudioRefDuration - currentTotal}s remaining)`,
+        `Audio too long — max ${maxAudioRefDuration}s total (${formatMediaDurationSeconds(remainingMediaDurationSeconds(currentDurations, maxAudioRefDuration) ?? 0)}s remaining)`,
       );
       return;
     }
@@ -236,7 +263,10 @@ export const MediaReferenceRow = ({
                 </span>
               </div>
               <span className="text-[13px] text-white/60">
-                {totalVideoDuration}/{maxVideoRefDuration}s
+                {formatMediaDurationMillis(
+                  totalVideoDurationMillis ?? Number.NaN,
+                )}
+                /{maxVideoRefDuration}s
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -284,7 +314,10 @@ export const MediaReferenceRow = ({
                 </span>
               </div>
               <span className="text-[13px] text-white/60">
-                {totalAudioDuration}/{maxAudioRefDuration}s
+                {formatMediaDurationMillis(
+                  totalAudioDurationMillis ?? Number.NaN,
+                )}
+                /{maxAudioRefDuration}s
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -336,7 +369,7 @@ const VideoRefTile = ({
       className="h-full w-full object-cover"
     />
     <div className="absolute bottom-0 left-0 right-0 flex items-center justify-center bg-black/70 py-0.5 text-[10px] font-bold text-white">
-      {video.duration}s
+      {formatMediaDurationSeconds(video.duration)}s
     </div>
     <button
       onClick={(e) => {
@@ -396,7 +429,7 @@ const AudioRefTile = ({
         />
       </button>
       <div className="pointer-events-none absolute bottom-0 left-0 right-0 flex items-center justify-center bg-black/70 py-0.5 text-[10px] font-bold text-white">
-        #{index + 1} · {audio.duration}s
+        #{index + 1} · {formatMediaDurationSeconds(audio.duration)}s
       </div>
       <button
         onClick={(e) => {

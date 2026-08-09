@@ -8,6 +8,7 @@ import {
 import { BoxIcon, ImagesIcon, LoaderCircleIcon, MusicIcon, PlayIcon, SquareIcon, UploadIcon, VideoIcon, XIcon } from "lucide-react";
 import { DynamicIcon } from "@storyteller/icons";
 import { Modal } from "@storyteller/ui-modal";
+import { formatMediaDurationSeconds } from "@storyteller/common";
 import { twMerge } from "tailwind-merge";
 import { DeckAddAction, DeckItem } from "./deckTypes";
 
@@ -155,7 +156,7 @@ export const DeckCard = ({
 
       {item.duration != null && (
         <div className="pointer-events-none absolute bottom-0 left-0 right-0 flex items-center justify-center bg-black/70 py-0.5 text-[10px] font-bold text-white">
-          {item.duration}s
+          {formatMediaDurationSeconds(item.duration)}s
         </div>
       )}
 

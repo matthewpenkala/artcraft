@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { OmniGenApi } from "@storyteller/api";
 import type { OmniGenImageRequest, OmniGenVideoRequest } from "@storyteller/api";
+import {
+  buildVideoCostEstimateRequest,
+  type MediaTokenDurationPair,
+} from "@storyteller/common";
 
 // ── Image cost estimate hook ─────────────────────────────────────────────
 
@@ -76,6 +80,8 @@ export interface VideoCostParams {
   hasEndFrame: boolean;
   isReferenceMode: boolean;
   referenceImageCount: number;
+  referenceVideoDurationPairs?: readonly MediaTokenDurationPair[];
+  referenceAudioDurationPairs?: readonly MediaTokenDurationPair[];
   generateAudio?: boolean;
 }
 
@@ -84,32 +90,32 @@ export function useVideoCostEstimate(params: VideoCostParams): number | null {
   const abortRef = useRef(0);
 
   useEffect(() => {
+    const id = ++abortRef.current;
+    setCredits(null);
     if (!params.model) {
-      setCredits(null);
-      return;
+      return () => {
+        if (id === abortRef.current) abortRef.current++;
+      };
     }
 
-    const id = ++abortRef.current;
-
-    const body: OmniGenVideoRequest = {
+    const body: OmniGenVideoRequest | null = buildVideoCostEstimateRequest({
       model: params.model,
-      aspect_ratio: params.aspectRatio ?? null,
-      resolution: params.resolution ?? null,
-      duration_seconds: params.duration ?? null,
-      generate_audio: params.generateAudio ?? null,
-      video_batch_count: params.numVideos ?? 1,
-    };
-
-    // Wire up frame/reference tokens based on mode
-    if (params.isReferenceMode && params.referenceImageCount > 0) {
-      body.reference_image_media_tokens = new Array(params.referenceImageCount).fill("placeholder");
-    } else {
-      if (params.hasStartFrame) {
-        body.start_frame_image_media_token = "placeholder";
-      }
-      if (params.hasEndFrame) {
-        body.end_frame_image_media_token = "placeholder";
-      }
+      aspectRatio: params.aspectRatio,
+      resolution: params.resolution,
+      duration: params.duration,
+      numVideos: params.numVideos,
+      hasStartFrame: params.hasStartFrame,
+      hasEndFrame: params.hasEndFrame,
+      isReferenceMode: params.isReferenceMode,
+      referenceImageCount: params.referenceImageCount,
+      referenceVideoDurationPairs: params.referenceVideoDurationPairs,
+      referenceAudioDurationPairs: params.referenceAudioDurationPairs,
+      generateAudio: params.generateAudio,
+    });
+    if (!body) {
+      return () => {
+        if (id === abortRef.current) abortRef.current++;
+      };
     }
 
     const api = new OmniGenApi();
@@ -127,6 +133,9 @@ export function useVideoCostEstimate(params: VideoCostParams): number | null {
         setCredits(null);
       },
     );
+    return () => {
+      if (id === abortRef.current) abortRef.current++;
+    };
   }, [
     params.model,
     params.aspectRatio,
@@ -137,6 +146,8 @@ export function useVideoCostEstimate(params: VideoCostParams): number | null {
     params.hasEndFrame,
     params.isReferenceMode,
     params.referenceImageCount,
+    params.referenceVideoDurationPairs,
+    params.referenceAudioDurationPairs,
     params.generateAudio,
   ]);
 

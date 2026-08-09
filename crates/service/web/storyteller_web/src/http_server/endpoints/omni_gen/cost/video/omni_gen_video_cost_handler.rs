@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use actix_web::web::{self, Json};
 use actix_web::HttpRequest;
-use artcraft_api_defs::omni_gen::cost_and_generate_requests::omni_gen_video_cost_and_generate_request::OmniGenVideoCostAndGenerateRequest;
+use artcraft_api_defs::omni_gen::cost_and_generate_requests::omni_gen_video_cost_and_generate_request::{EstimateFields, OmniGenVideoCostAndGenerateRequest};
 use artcraft_api_defs::omni_gen::cost_response::omni_gen_video_cost_response::OmniGenVideoCostResponse;
 use artcraft_router::api::router_provider::RouterProvider;
 use enums::common::generation::common_video_model::CommonVideoModel;
@@ -44,16 +44,21 @@ pub async fn omni_gen_video_cost_handler(
   builder.provider = RouterProvider::Artcraft; // NB: User is paying for ArtCraft credits / generation
 
   // Seedance 2.5 bills reference-video input seconds on top of the output
-  // duration, so the quote needs the combined input duration. Prefer the
-  // frontend-supplied `estimate_only` hint (cheap — the UI polls this
-  // endpoint while composing); fall back to a best-effort server-side
-  // download + ffprobe when it's absent. Either way this only shapes the
-  // QUOTE: the generate endpoint always measures the inputs itself and
-  // bills from its own measurement.
+  // duration. Prefer exact per-reference frontend milliseconds so each
+  // transmitted reference is rounded independently like generation; old
+  // clients may provide only a raw aggregate. A present-but-invalid
+  // per-reference array is not allowed to underquote through that legacy
+  // aggregate — it falls through to the best-effort server probe. Either way
+  // this only shapes the QUOTE: the
+  // generate endpoint always measures and bills the inputs itself.
   if matches!(request.model, Some(CommonVideoModel::Seedance2p5 | CommonVideoModel::Seedance2p5Ultra)) {
-    let frontend_input_seconds = request.estimate_only
-      .and_then(|estimate| estimate.total_input_video_duration_millis)
-      .map(millis_to_whole_seconds);
+    let video_reference_tokens = request.reference_video_media_tokens
+      .as_deref()
+      .unwrap_or_default();
+    let frontend_input_seconds = frontend_estimate_input_seconds(
+      request.estimate_only.as_ref(),
+      video_reference_tokens,
+    );
 
     if let Some(input_seconds) = frontend_input_seconds {
       builder.total_reference_video_input_seconds = Some(input_seconds);
@@ -87,6 +92,36 @@ pub async fn omni_gen_video_cost_handler(
 /// saturating to `u16` (the router clamps to the model's max regardless).
 fn millis_to_whole_seconds(millis: u32) -> u16 {
   u16::try_from(u64::from(millis).div_ceil(1_000)).unwrap_or(u16::MAX)
+}
+
+fn frontend_estimate_input_seconds<T>(
+  estimate: Option<&EstimateFields>,
+  video_reference_tokens: &[T],
+) -> Option<u16> {
+  let estimate = estimate?;
+  match estimate.reference_video_durations_millis.as_deref() {
+    Some(durations)
+      if !durations.is_empty()
+        && durations.len() == video_reference_tokens.len()
+        && durations.iter().all(|duration| *duration > 0) =>
+    {
+      Some(per_reference_millis_to_total_seconds(durations))
+    }
+    Some(_) => None,
+    None => estimate.total_input_video_duration_millis
+      .filter(|duration| !video_reference_tokens.is_empty() && *duration > 0)
+      .map(millis_to_whole_seconds),
+  }
+}
+
+/// Apply generation's billing rule: ceil every reference independently,
+/// then sum with the router's u16 saturation behavior.
+fn per_reference_millis_to_total_seconds(millis: &[u32]) -> u16 {
+  let total = millis
+    .iter()
+    .map(|duration| u64::from(*duration).div_ceil(1_000))
+    .sum::<u64>();
+  u16::try_from(total).unwrap_or(u16::MAX)
 }
 
 /// Probe the combined reference-video runtime for the quote, failing open.
@@ -135,6 +170,119 @@ mod tests {
   use enums::common::generation::common_video_model::CommonVideoModel;
 
   use super::*;
+
+  #[test]
+  fn estimate_hint_rounds_each_reference_before_summing() {
+    assert_eq!(per_reference_millis_to_total_seconds(&[5_400, 5_400]), 12);
+    assert_eq!(per_reference_millis_to_total_seconds(&[5_600, 5_600]), 12);
+    assert_eq!(per_reference_millis_to_total_seconds(&[5_000, 5_000]), 10);
+    assert_eq!(per_reference_millis_to_total_seconds(&[1_000, 2_001, 2_001, 4_999]), 12);
+    assert_eq!(millis_to_whole_seconds(10_800), 11);
+  }
+
+  #[test]
+  fn per_reference_hint_wins_over_legacy_aggregate() {
+    let estimate = EstimateFields {
+      reference_video_durations_millis: Some(vec![5_400, 5_400]),
+      total_input_video_duration_millis: Some(10_800),
+      total_input_audio_duration_millis: None,
+    };
+    assert_eq!(
+      frontend_estimate_input_seconds(Some(&estimate), &["video-a", "video-b"]),
+      Some(12),
+    );
+  }
+
+  #[test]
+  fn per_reference_hint_counts_duplicate_transmitted_tokens_separately() {
+    let estimate = EstimateFields {
+      reference_video_durations_millis: Some(vec![5_400, 9_900]),
+      total_input_video_duration_millis: Some(15_300),
+      total_input_audio_duration_millis: None,
+    };
+    assert_eq!(
+      frontend_estimate_input_seconds(
+        Some(&estimate),
+        &["same-video", "same-video"],
+      ),
+      Some(16),
+    );
+  }
+
+  #[test]
+  fn per_reference_hint_preserves_equal_durations_for_distinct_tokens() {
+    let estimate = EstimateFields {
+      reference_video_durations_millis: Some(vec![5_400, 5_400]),
+      total_input_video_duration_millis: Some(10_800),
+      total_input_audio_duration_millis: None,
+    };
+    assert_eq!(
+      frontend_estimate_input_seconds(Some(&estimate), &["video-a", "video-b"]),
+      Some(12),
+    );
+  }
+
+  #[test]
+  fn invalid_present_per_reference_hint_requires_server_probe() {
+    for durations in [vec![5_400], vec![5_400, 0]] {
+      let estimate = EstimateFields {
+        reference_video_durations_millis: Some(durations),
+        total_input_video_duration_millis: Some(10_800),
+        total_input_audio_duration_millis: None,
+      };
+      assert_eq!(
+        frontend_estimate_input_seconds(Some(&estimate), &["video-a", "video-b"]),
+        None,
+      );
+    }
+  }
+
+  #[test]
+  fn absent_per_reference_hint_keeps_legacy_aggregate_fallback() {
+    let estimate = EstimateFields {
+      reference_video_durations_millis: None,
+      total_input_video_duration_millis: Some(10_800),
+      total_input_audio_duration_millis: None,
+    };
+    assert_eq!(
+      frontend_estimate_input_seconds(Some(&estimate), &["video-a", "video-b"]),
+      Some(11),
+    );
+  }
+
+  #[test]
+  fn zero_legacy_aggregate_with_references_requires_server_probe() {
+    let estimate = EstimateFields {
+      reference_video_durations_millis: None,
+      total_input_video_duration_millis: Some(0),
+      total_input_audio_duration_millis: None,
+    };
+    assert_eq!(
+      frontend_estimate_input_seconds(Some(&estimate), &["video-a", "video-b"]),
+      None,
+    );
+  }
+
+  #[test]
+  fn legacy_aggregate_without_references_is_ignored() {
+    let estimate = EstimateFields {
+      reference_video_durations_millis: None,
+      total_input_video_duration_millis: Some(10_800),
+      total_input_audio_duration_millis: None,
+    };
+    assert_eq!(
+      frontend_estimate_input_seconds(Some(&estimate), &[] as &[&str]),
+      None,
+    );
+  }
+
+  #[test]
+  fn per_reference_hint_saturates_at_router_limit() {
+    assert_eq!(
+      per_reference_millis_to_total_seconds(&[u32::MAX, u32::MAX]),
+      u16::MAX,
+    );
+  }
 
   mod cost_without_inputs_tests {
     use super::*;

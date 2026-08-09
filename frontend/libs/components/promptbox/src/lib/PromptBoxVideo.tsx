@@ -1,6 +1,9 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { useSignals } from "@preact/signals-react/runtime";
-import { JobContextType } from "@storyteller/common";
+import {
+  JobContextType,
+  formatMediaDurationSeconds,
+} from "@storyteller/common";
 import { PopoverMenu, PopoverItem } from "@storyteller/ui-popover";
 import { SliderV2 } from "@storyteller/ui-sliderv2";
 import { Tooltip } from "@storyteller/ui-tooltip";
@@ -832,8 +835,8 @@ export const PromptBoxVideo = ({
     Number.isFinite(limit) ? String(limit) : "∞";
   const refDeckGroupHints = {
     image: `${referenceImages.length}/${displayCountLimit(referenceCapabilities.maxReferenceImages)}`,
-    video: `${referenceVideos.length}/${displayCountLimit(referenceCapabilities.maxReferenceVideos)} · ${totalVideoRefSeconds}/${displayDurationLimit(maxVideoTotalSec)}s`,
-    audio: `${referenceAudios.length}/${displayCountLimit(referenceCapabilities.maxReferenceAudios)} · ${totalAudioRefSeconds}/${displayDurationLimit(maxAudioTotalSec)}s`,
+    video: `${referenceVideos.length}/${displayCountLimit(referenceCapabilities.maxReferenceVideos)} · ${formatMediaDurationSeconds(totalVideoRefSeconds)}/${displayDurationLimit(maxVideoTotalSec)}s`,
+    audio: `${referenceAudios.length}/${displayCountLimit(referenceCapabilities.maxReferenceAudios)} · ${formatMediaDurationSeconds(totalAudioRefSeconds)}/${displayDurationLimit(maxAudioTotalSec)}s`,
   };
 
   const renderReferenceDeck = (alwaysExpanded?: boolean) => (

@@ -8,7 +8,10 @@ import {
 import { FolderOpenIcon, ImageIcon, MusicIcon, PlayIcon, PlusIcon, SquareIcon, XIcon } from "lucide-react";
 import { DynamicIcon } from "@storyteller/icons";
 import { toast } from "@storyteller/ui-toaster";
-import { UploaderStates } from "@storyteller/common";
+import {
+  UploaderStates,
+  formatMediaDurationSeconds,
+} from "@storyteller/common";
 import type { UploadMediaFn } from "@storyteller/api";
 import type { RefAudio, RefImage } from "../promptStore";
 import {
@@ -350,7 +353,7 @@ function AudioRefTile({
         />
       </button>
       <span className="text-xs font-medium text-base-fg/80">
-        Audio {index + 1} · {audio.duration}s
+        Audio {index + 1} · {formatMediaDurationSeconds(audio.duration)}s
       </span>
       <button
         type="button"

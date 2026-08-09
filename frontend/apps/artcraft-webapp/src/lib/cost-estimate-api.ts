@@ -12,6 +12,10 @@ import {
 } from "@storyteller/ui-model-selector";
 import { usePrompt3DStore } from "@storyteller/ui-promptbox";
 import { useCostBreakdownModalStore } from "@storyteller/ui-pricing-modal";
+import {
+  buildVideoCostEstimateRequest,
+  type MediaTokenDurationPair,
+} from "@storyteller/common";
 
 // ── Image cost estimate hook ─────────────────────────────────────────────
 
@@ -137,17 +141,9 @@ export interface VideoCostParams {
   hasEndFrame: boolean;
   isReferenceMode: boolean;
   referenceImageCount: number;
-  referenceVideoCount?: number;
+  referenceVideoDurationPairs?: readonly MediaTokenDurationPair[];
+  referenceAudioDurationPairs?: readonly MediaTokenDurationPair[];
   generateAudio?: boolean;
-  /**
-   * Combined duration of the attached reference videos, in milliseconds.
-   * Models like Seedance 2.5 bill input seconds on top of the output
-   * duration, so the quote needs this (estimate-only; generation measures
-   * the real files server-side).
-   */
-  totalInputVideoDurationMillis?: number | null;
-  /** Combined duration of the attached reference audio, in milliseconds. */
-  totalInputAudioDurationMillis?: number | null;
 }
 
 export function useVideoCostEstimate(params: VideoCostParams): number | null {
@@ -155,50 +151,32 @@ export function useVideoCostEstimate(params: VideoCostParams): number | null {
   const abortRef = useRef(0);
 
   useEffect(() => {
-    if (!params.model) {
-      setCredits(null);
-      return;
-    }
-
     const id = ++abortRef.current;
-
-    const body: OmniGenVideoRequest = {
-      model: params.model,
-      aspect_ratio: params.aspectRatio ?? null,
-      resolution: params.resolution ?? null,
-      bitrate: params.bitrate ?? null,
-      duration_seconds: params.duration ?? null,
-      generate_audio: params.generateAudio ?? null,
-      video_batch_count: params.numVideos ?? 1,
-    };
-
-    // Wire up frame/reference tokens based on mode
-    if (params.isReferenceMode) {
-      if (params.referenceImageCount > 0) {
-        body.reference_image_media_tokens = new Array(params.referenceImageCount).fill("placeholder");
-      }
-      // Video references change the rate on models that bill input seconds
-      // (e.g. Seedance 2.5), so the quote must know they're attached.
-      if ((params.referenceVideoCount ?? 0) > 0) {
-        body.reference_video_media_tokens = new Array(params.referenceVideoCount).fill("placeholder");
-      }
-    } else {
-      if (params.hasStartFrame) {
-        body.start_frame_image_media_token = "placeholder";
-      }
-      if (params.hasEndFrame) {
-        body.end_frame_image_media_token = "placeholder";
-      }
+    setCredits(null);
+    if (!params.model) {
+      return () => {
+        if (id === abortRef.current) abortRef.current++;
+      };
     }
 
-    // Estimate-only hints (ignored by generation).
-    if (
-      params.totalInputVideoDurationMillis != null ||
-      params.totalInputAudioDurationMillis != null
-    ) {
-      body.estimate_only = {
-        total_input_video_duration_millis: params.totalInputVideoDurationMillis ?? null,
-        total_input_audio_duration_millis: params.totalInputAudioDurationMillis ?? null,
+    const body: OmniGenVideoRequest | null = buildVideoCostEstimateRequest({
+      model: params.model,
+      aspectRatio: params.aspectRatio,
+      resolution: params.resolution,
+      bitrate: params.bitrate,
+      duration: params.duration,
+      numVideos: params.numVideos,
+      hasStartFrame: params.hasStartFrame,
+      hasEndFrame: params.hasEndFrame,
+      isReferenceMode: params.isReferenceMode,
+      referenceImageCount: params.referenceImageCount,
+      referenceVideoDurationPairs: params.referenceVideoDurationPairs,
+      referenceAudioDurationPairs: params.referenceAudioDurationPairs,
+      generateAudio: params.generateAudio,
+    });
+    if (!body) {
+      return () => {
+        if (id === abortRef.current) abortRef.current++;
       };
     }
 
@@ -217,6 +195,9 @@ export function useVideoCostEstimate(params: VideoCostParams): number | null {
         setCredits(null);
       },
     );
+    return () => {
+      if (id === abortRef.current) abortRef.current++;
+    };
   }, [
     params.model,
     params.aspectRatio,
@@ -228,10 +209,9 @@ export function useVideoCostEstimate(params: VideoCostParams): number | null {
     params.hasEndFrame,
     params.isReferenceMode,
     params.referenceImageCount,
-    params.referenceVideoCount,
+    params.referenceVideoDurationPairs,
+    params.referenceAudioDurationPairs,
     params.generateAudio,
-    params.totalInputVideoDurationMillis,
-    params.totalInputAudioDurationMillis,
   ]);
 
   return credits;

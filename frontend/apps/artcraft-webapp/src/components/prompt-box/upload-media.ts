@@ -1,5 +1,10 @@
 import { MediaUploadApi } from "@storyteller/api";
-import { UploaderState, UploaderStates } from "@storyteller/common";
+import {
+  UploaderState,
+  UploaderStates,
+  probeMediaDurationFromFile,
+  probeMediaDurationFromUrl,
+} from "@storyteller/common";
 
 export type UploadMediaFn = (args: {
   title: string;
@@ -75,40 +80,14 @@ export const uploadAudio: UploadMediaFn = async ({
 
 // Resolves 0 when metadata can't be loaded.
 export const getVideoDurationFromUrl = (url: string): Promise<number> =>
-  new Promise((resolve) => {
-    const video = document.createElement("video");
-    video.preload = "metadata";
-    video.onloadedmetadata = () => resolve(Math.round(video.duration));
-    video.onerror = () => resolve(0);
-    video.src = url;
-  });
+  probeMediaDurationFromUrl("video", url).then((duration) => duration ?? 0);
 
 // Resolves 0 when metadata can't be loaded.
 export const getAudioDurationFromUrl = (url: string): Promise<number> =>
-  new Promise((resolve) => {
-    const audio = document.createElement("audio");
-    audio.preload = "metadata";
-    audio.onloadedmetadata = () => resolve(Math.round(audio.duration));
-    audio.onerror = () => resolve(0);
-    audio.src = url;
-  });
+  probeMediaDurationFromUrl("audio", url).then((duration) => duration ?? 0);
 
-export const getVideoDuration = (file: File): Promise<number> => {
-  const url = URL.createObjectURL(file);
-  return getVideoDurationFromUrl(url).finally(() => URL.revokeObjectURL(url));
-};
+export const getVideoDuration = (file: File): Promise<number> =>
+  probeMediaDurationFromFile("video", file).then((duration) => duration ?? 0);
 
 export const getAudioDuration = (file: File): Promise<number> =>
-  new Promise((resolve) => {
-    const audio = document.createElement("audio");
-    audio.preload = "metadata";
-    audio.onloadedmetadata = () => {
-      URL.revokeObjectURL(audio.src);
-      resolve(Math.round(audio.duration));
-    };
-    audio.onerror = () => {
-      URL.revokeObjectURL(audio.src);
-      resolve(0);
-    };
-    audio.src = URL.createObjectURL(file);
-  });
+  probeMediaDurationFromFile("audio", file).then((duration) => duration ?? 0);

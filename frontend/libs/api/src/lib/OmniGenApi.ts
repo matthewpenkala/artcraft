@@ -40,9 +40,15 @@ export interface OmniGenImageGenerateResponse {
 
 // Frontend-supplied hints for cost estimation only. IGNORED by generation —
 // the backend measures inputs itself (e.g. ffprobing reference videos) when
-// it bills. Seedance 2.5 bills reference-video input seconds, so its cost
-// quote needs the combined input duration.
+// it bills. New clients send exact per-reference video milliseconds so the
+// cost handler can ceil each file independently; raw combined totals remain
+// available for old-server compatibility and non-billed audio metadata.
 export interface OmniGenEstimateFields {
+  /**
+   * Index-aligned with reference_video_media_tokens; every transmitted entry
+   * represents one reference for cost handling.
+   */
+  reference_video_durations_millis?: number[] | null;
   total_input_video_duration_millis?: number | null;
   total_input_audio_duration_millis?: number | null;
 }

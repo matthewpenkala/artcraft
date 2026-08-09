@@ -78,11 +78,18 @@ pub struct OmniGenVideoCostAndGenerateRequest {
 
 /// These fields are ignored by generation. They're only used by the frontend
 /// to aid in cost estimation (e.g. Seedance 2.5 bills reference-video input
-/// seconds, so the cost quote needs the combined input duration without the
-/// server downloading and probing the files on every poll).
-#[derive(Clone, Copy, Serialize, Deserialize, ToSchema, Debug, Default)]
+/// seconds, so the cost quote needs per-reference durations without the server
+/// downloading and probing the files on every poll).
+#[derive(Clone, Serialize, Deserialize, ToSchema, Debug, Default)]
 pub struct EstimateFields {
+  /// Duration of each reference video input, in milliseconds. The cost
+  /// handler aligns entries with `reference_video_media_tokens` and rounds
+  /// each entry up independently. Repeated tokens remain separate transmitted
+  /// references, matching server generation.
+  pub reference_video_durations_millis: Option<Vec<u32>>,
+
   /// Combined duration of all reference video inputs, in milliseconds.
+  /// Legacy fallback only; new clients should send the per-reference field.
   pub total_input_video_duration_millis: Option<u32>,
 
   /// Combined duration of all reference audio inputs, in milliseconds.

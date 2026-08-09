@@ -34,6 +34,7 @@ import { uploadImage } from "./upload-image";
 import { uploadVideo, uploadAudio } from "./upload-media";
 import type { RefImage, RefVideo, RefAudio, MentionItem } from "./types";
 import { useEnterToGenerateStore } from "../../lib/enter-to-generate-store";
+import { formatMediaDurationSeconds } from "@storyteller/common";
 import {
   PromptFullscreenButton,
   PromptFullscreenModal,
@@ -550,14 +551,14 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
         groupHints.video =
           `${referenceVideos.length}/${maxVideoCount}` +
           (isFinite(maxVideoRefDuration)
-            ? ` · ${totalVideoRefSeconds}/${maxVideoRefDuration}s`
+            ? ` · ${formatMediaDurationSeconds(totalVideoRefSeconds)}/${maxVideoRefDuration}s`
             : "");
       }
       if (audioRefsSupported) {
         groupHints.audio =
           `${referenceAudios.length}/${maxAudioCount}` +
           (isFinite(maxAudioRefDuration)
-            ? ` · ${totalAudioRefSeconds}/${maxAudioRefDuration}s`
+            ? ` · ${formatMediaDurationSeconds(totalAudioRefSeconds)}/${maxAudioRefDuration}s`
             : "");
       }
 
