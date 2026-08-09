@@ -1,7 +1,9 @@
 import { useEffect } from "react";
 import { ModelPage } from "@storyteller/ui-model-selector";
 import {
+  hasVideoDurationConfiguration,
   Model,
+  projectVideoDuration,
   resolveVideoAspectRatioOption,
   VideoModel,
 } from "@storyteller/model-list";
@@ -33,20 +35,40 @@ export function useVideoCostEstimate(
   const referenceImages = usePromptVideoStore((s) => s.referenceImages);
   const endFrameImage = usePromptVideoStore((s) => s.endFrameImage);
   const generateWithSound = usePromptVideoStore((s) => s.generateWithSound);
+  const videoModel =
+    selectedModel?.kind === "video_model"
+      ? (selectedModel as VideoModel)
+      : null;
+  const effectiveReferenceMode =
+    inputMode === "reference" && !!videoModel?.supportsReferenceMode;
+  const resolvedDuration = videoModel
+    ? projectVideoDuration(videoModel, {
+        storedDuration: duration,
+        effectiveReferenceMode,
+        imageCount: referenceImages.length,
+        hasEndFrameImage: !!endFrameImage,
+      }).estimateDuration
+    : null;
 
   useEffect(() => {
-    if (activePage !== ModelPage.ImageToVideo || !selectedModel) {
+    if (activePage !== ModelPage.ImageToVideo || !videoModel) {
+      clear(ModelPage.ImageToVideo);
+      return;
+    }
+    if (
+      resolvedDuration === null &&
+      hasVideoDurationConfiguration(videoModel)
+    ) {
       clear(ModelPage.ImageToVideo);
       return;
     }
 
-    const commonModel = videoModelToCommonVideoModel(selectedModel.tauriId);
+    const commonModel = videoModelToCommonVideoModel(videoModel.tauriId);
     if (!commonModel) {
       clear(ModelPage.ImageToVideo);
       return;
     }
 
-    const videoModel = selectedModel as VideoModel;
     const resolvedAspectRatioOption = resolveVideoAspectRatioOption(
       videoModel,
       aspectRatio,
@@ -62,42 +84,50 @@ export function useVideoCostEstimate(
       endFrameImage,
       videoModel.supportsReferenceMode,
     );
-
     const provider =
       (selectedProvider as GenerationProvider | null | undefined) ??
       GenerationProvider.Artcraft;
 
     const request = begin(ModelPage.ImageToVideo);
-    void (async () => {
-      try {
-        const result = await EstimateVideoCost({
-          model: commonModel,
-          provider,
-          generation_mode: generationMode,
-          aspect_ratio: commonAspectRatio ?? undefined,
-          resolution: commonResolution ?? undefined,
-          duration_seconds: duration ?? undefined,
-          generate_audio: generateWithSound,
-        });
-        request.settle(
-          isEstimateVideoCostSuccess(result)
-            ? (result.payload.cost_in_credits ?? null)
-            : null,
-        );
-      } catch {
-        request.settle(null);
-      }
-    })();
+    // The prompt store is authoritative immediately. Debounce only the remote
+    // estimate call so the UI never displays the previous quote beside a newly
+    // selected duration while still avoiding a request for every drag event.
+    const estimateTimer = setTimeout(() => {
+      void (async () => {
+        try {
+          const result = await EstimateVideoCost({
+            model: commonModel,
+            provider,
+            generation_mode: generationMode,
+            aspect_ratio: commonAspectRatio ?? undefined,
+            resolution: commonResolution ?? undefined,
+            duration_seconds: resolvedDuration ?? undefined,
+            generate_audio: generateWithSound,
+          });
+          request.settle(
+            isEstimateVideoCostSuccess(result)
+              ? (result.payload.cost_in_credits ?? null)
+              : null,
+          );
+        } catch {
+          request.settle(null);
+        }
+      })();
+    }, 300);
 
-    return request.cancel;
+    return () => {
+      clearTimeout(estimateTimer);
+      request.cancel();
+    };
   }, [
     activePage,
-    selectedModel,
+    videoModel,
     selectedProvider,
-    duration,
+    resolvedDuration,
     aspectRatio,
     resolution,
     inputMode,
+    effectiveReferenceMode,
     referenceImages.length,
     !!endFrameImage,
     generateWithSound,

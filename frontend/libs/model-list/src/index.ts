@@ -9,6 +9,17 @@ export {
   resolveVideoAspectRatioOption,
   type VideoAspectRatioCapabilities,
 } from "./lib/classes/properties/VideoAspectRatio.js";
+export {
+  getVideoDurationConstraint,
+  hasVideoDurationConfiguration,
+  projectVideoDuration,
+  resolveVideoDuration,
+  type VideoDurationCapabilities,
+  type VideoDurationConstraint,
+  type VideoDurationMediaInputs,
+  type VideoDurationProjection,
+  type VideoDurationProjectionInputs,
+} from "./lib/classes/properties/VideoDuration.js";
 export * from "./lib/classes/metadata/ModelCreator.js";
 export * from "./lib/classes/metadata/ModelCreatorIcons.js";
 export * from "./lib/classes/metadata/ModelCreatorIconForId.js";
