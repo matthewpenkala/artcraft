@@ -24,6 +24,10 @@ import {
   resolveVideoDurationSliderSelection,
 } from "./videoDurationControl";
 import {
+  projectPromptVideoReferences,
+  synchronizePromptVideoReferences,
+} from "./videoReferenceControl";
+import {
   usePromptVideoStore,
   RefImage,
   VideoInputMode,
@@ -252,14 +256,41 @@ export const PromptBoxVideo = ({
     });
   };
 
-  const referenceImages = usePromptVideoStore((s) => s.referenceImages);
+  const storedReferenceImages = usePromptVideoStore((s) => s.referenceImages);
   const setReferenceImages = usePromptVideoStore((s) => s.setReferenceImages);
-  const endFrameImage = usePromptVideoStore((s) => s.endFrameImage);
+  const storedEndFrameImage = usePromptVideoStore((s) => s.endFrameImage);
   const setEndFrameImage = usePromptVideoStore((s) => s.setEndFrameImage);
-  const referenceVideos = usePromptVideoStore((s) => s.referenceVideos);
+  const storedReferenceVideos = usePromptVideoStore((s) => s.referenceVideos);
   const setReferenceVideos = usePromptVideoStore((s) => s.setReferenceVideos);
-  const referenceAudios = usePromptVideoStore((s) => s.referenceAudios);
+  const storedReferenceAudios = usePromptVideoStore((s) => s.referenceAudios);
   const setReferenceAudios = usePromptVideoStore((s) => s.setReferenceAudios);
+
+  const referenceProjection = useMemo(
+    () =>
+      projectPromptVideoReferences(selectedModel ?? {}, {
+        inputMode,
+        referenceImages: storedReferenceImages,
+        endFrameImage: storedEndFrameImage,
+        referenceVideos: storedReferenceVideos,
+        referenceAudios: storedReferenceAudios,
+      }),
+    [
+      selectedModel,
+      inputMode,
+      storedReferenceImages,
+      storedEndFrameImage,
+      storedReferenceVideos,
+      storedReferenceAudios,
+    ],
+  );
+  const {
+    capabilities: referenceCapabilities,
+    inputMode: effectiveInputMode,
+    referenceImages,
+    endFrameImage,
+    referenceVideos,
+    referenceAudios,
+  } = referenceProjection;
 
   // TODO: Get rid of default resolutions. Just disable it if not present.
   let aspectRatioOptions: PopoverItem[];
@@ -367,8 +398,7 @@ export const PromptBoxVideo = ({
     );
   };
 
-  const isReferenceMode =
-    inputMode === "reference" && !!selectedModel?.supportsReferenceMode;
+  const isReferenceMode = effectiveInputMode === "reference";
 
   const committedDurationProjection = selectedModel
     ? projectVideoDuration(selectedModel, {
@@ -387,15 +417,19 @@ export const PromptBoxVideo = ({
   // restored together (for example, Recreate) without relying on a stale
   // render closure. Pending slider state is projected separately below.
   useEffect(() => {
-    const currentDuration = usePromptVideoStore.getState().duration;
+    const currentState = usePromptVideoStore.getState();
+    const currentDuration = currentState.duration;
+    const currentReferences = selectedModel
+      ? projectPromptVideoReferences(selectedModel, currentState)
+      : null;
     const resolvedDuration = selectedModel
       ? projectVideoDuration(selectedModel, {
           storedDuration: currentDuration,
-          effectiveReferenceMode: isReferenceMode,
-          imageCount: referenceImages.length,
-          hasEndFrameImage: !!endFrameImage,
-          videoCount: referenceVideos.length,
-          audioCount: referenceAudios.length,
+          effectiveReferenceMode: currentReferences?.inputMode === "reference",
+          imageCount: currentReferences?.referenceImages.length ?? 0,
+          hasEndFrameImage: !!currentReferences?.endFrameImage,
+          videoCount: currentReferences?.referenceVideos.length ?? 0,
+          audioCount: currentReferences?.referenceAudios.length ?? 0,
         }).estimateDuration
       : null;
     if (!Object.is(currentDuration, resolvedDuration)) {
@@ -425,19 +459,37 @@ export const PromptBoxVideo = ({
     }
   }, [selectedModel]);
 
-  // Reset input mode when switching to a model that doesn't support reference.
-  // Read from store directly to avoid stale closure (same as duration above).
+  // Remove media the selected model cannot actually use and normalize a stale
+  // reference mode. The same pure projection drives the visible controls and
+  // request path below, so this effect is state cleanup rather than a safety
+  // dependency.
   useEffect(() => {
-    const currentInputMode = usePromptVideoStore.getState().inputMode;
-    if (
-      !selectedModel?.supportsReferenceMode &&
-      currentInputMode === "reference"
-    ) {
-      setInputMode("keyframe");
-      setReferenceVideos([]);
-      setReferenceAudios([]);
-    }
-  }, [selectedModel]);
+    if (!selectedModel) return;
+    const current = usePromptVideoStore.getState();
+    const currentProjection = projectPromptVideoReferences(
+      selectedModel,
+      current,
+    );
+    synchronizePromptVideoReferences(current, currentProjection, {
+      setInputMode,
+      setReferenceImages,
+      setEndFrameImage,
+      setReferenceVideos,
+      setReferenceAudios,
+    });
+  }, [
+    selectedModel,
+    inputMode,
+    storedReferenceImages,
+    storedEndFrameImage,
+    storedReferenceVideos,
+    storedReferenceAudios,
+    setInputMode,
+    setReferenceImages,
+    setEndFrameImage,
+    setReferenceVideos,
+    setReferenceAudios,
+  ]);
 
   // Reset generation count when switching away from seedance 2.0.
   // Read from store directly to avoid stale closure (same as duration above).
@@ -524,17 +576,17 @@ export const PromptBoxVideo = ({
   };
 
   const inputModeOptions: PopoverItem[] | null =
-    selectedModel?.supportsReferenceMode
+    referenceCapabilities.supportsReferenceMode
       ? [
           {
             label: "Keyframe",
             description: "First/Last frame",
-            selected: inputMode === "keyframe",
+            selected: effectiveInputMode === "keyframe",
           },
           {
             label: "Omni Reference",
             description: "Multi-media ref",
-            selected: inputMode === "reference",
+            selected: effectiveInputMode === "reference",
           },
         ]
       : null;
@@ -552,12 +604,19 @@ export const PromptBoxVideo = ({
     }
   };
 
-  const maxImageCount = isReferenceMode
-    ? (selectedModel?.maxReferenceImages ?? 3)
-    : 1;
-
-  const maxVideoCount = selectedModel?.maxReferenceVideos ?? 3;
-  const maxAudioCount = selectedModel?.maxReferenceAudios ?? 2;
+  const maxImageCount = referenceProjection.maxImageCount;
+  const maxVideoCount = referenceProjection.maxVideoCount;
+  const maxAudioCount = referenceProjection.maxAudioCount;
+  const maxVideoTotalSec = referenceCapabilities.maxVideoRefDuration;
+  const maxAudioTotalSec = referenceCapabilities.maxAudioRefDuration;
+  const totalVideoRefSeconds = referenceVideos.reduce(
+    (sum, video) => sum + video.duration,
+    0,
+  );
+  const totalAudioRefSeconds = referenceAudios.reduce(
+    (sum, audio) => sum + audio.duration,
+    0,
+  );
 
   const deck = useDeckMedia({
     referenceImages,
@@ -566,13 +625,17 @@ export const PromptBoxVideo = ({
     endFrameImage,
     setEndFrameImage,
     referenceVideos,
-    setReferenceVideos,
+    setReferenceVideos: referenceProjection.acceptsVideos
+      ? setReferenceVideos
+      : undefined,
     maxVideos: maxVideoCount,
-    maxVideoTotalSec: selectedModel?.maxVideoRefDuration ?? 15,
+    maxVideoTotalSec: referenceCapabilities.maxVideoRefDuration,
     referenceAudios,
-    setReferenceAudios,
+    setReferenceAudios: referenceProjection.acceptsAudio
+      ? setReferenceAudios
+      : undefined,
     maxAudios: maxAudioCount,
-    maxAudioTotalSec: selectedModel?.maxAudioRefDuration ?? 15,
+    maxAudioTotalSec: referenceCapabilities.maxAudioRefDuration,
     uploadImage,
     uploadVideo,
     uploadAudio,
@@ -583,8 +646,8 @@ export const PromptBoxVideo = ({
   // kind their MIME matches, gated on what the model supports. Keyframe mode
   // renders no video/audio deck, so those kinds only land in reference mode
   // where the user can see (and remove) them.
-  const dropAcceptsVideos = isReferenceMode && maxVideoCount > 0;
-  const dropAcceptsAudio = isReferenceMode && maxAudioCount > 0;
+  const dropAcceptsVideos = referenceProjection.acceptsVideos;
+  const dropAcceptsAudio = referenceProjection.acceptsAudio;
 
   const handleDroppedFiles = ({ images, videos, audios }: DroppedFiles) => {
     if (images.length > 0) {
@@ -592,16 +655,20 @@ export const PromptBoxVideo = ({
         // Fill the empty keyframe slots in order: first frame, then last.
         const queue = [...images];
         const firstOpen =
-          referenceImages.length === 0 && deck.uploadingImages.length === 0;
+          referenceProjection.acceptsStartFrame &&
+          referenceImages.length === 0 &&
+          deck.uploadingImages.length === 0;
         const lastOpen =
-          !!selectedModel?.endFrame && !endFrameImage && !deck.uploadingEnd;
+          referenceProjection.acceptsEndFrame &&
+          !endFrameImage &&
+          !deck.uploadingEnd;
         if (firstOpen) deck.processImageFiles([queue.shift()!], "start");
         if (lastOpen && queue.length > 0) {
           deck.processImageFiles([queue.shift()!], "end");
         }
         if (!firstOpen && !lastOpen) {
           toast.error(
-            selectedModel?.endFrame
+            referenceCapabilities.supportsEndFrame
               ? "First and last frames are already set"
               : "The first frame is already set",
           );
@@ -619,7 +686,7 @@ export const PromptBoxVideo = ({
   };
 
   const drop = usePromptBoxDrop({
-    acceptsImages: maxImageCount > 0,
+    acceptsImages: referenceProjection.acceptsImages,
     acceptsVideos: dropAcceptsVideos,
     acceptsAudio: dropAcceptsAudio,
     onDropFiles: handleDroppedFiles,
@@ -706,7 +773,12 @@ export const PromptBoxVideo = ({
       },
     );
   }
-  if (referenceVideos.length < maxVideoCount && !deck.uploadingVideo) {
+  if (
+    referenceProjection.acceptsVideos &&
+    referenceVideos.length < maxVideoCount &&
+    totalVideoRefSeconds < maxVideoTotalSec &&
+    !deck.uploadingVideo
+  ) {
     refDeckAddActions.push(
       {
         key: "upload-video",
@@ -722,7 +794,12 @@ export const PromptBoxVideo = ({
       },
     );
   }
-  if (referenceAudios.length < maxAudioCount && !deck.uploadingAudio) {
+  if (
+    referenceProjection.acceptsAudio &&
+    referenceAudios.length < maxAudioCount &&
+    totalAudioRefSeconds < maxAudioTotalSec &&
+    !deck.uploadingAudio
+  ) {
     refDeckAddActions.push(
       {
         key: "upload-audio",
@@ -749,21 +826,14 @@ export const PromptBoxVideo = ({
     }
   };
 
-  const maxVideoTotalSec = selectedModel?.maxVideoRefDuration ?? 15;
-  const maxAudioTotalSec = selectedModel?.maxAudioRefDuration ?? 15;
-  const totalVideoRefSeconds = referenceVideos.reduce(
-    (sum, video) => sum + video.duration,
-    0,
-  );
-  const totalAudioRefSeconds = referenceAudios.reduce(
-    (sum, audio) => sum + audio.duration,
-    0,
-  );
-
+  const displayCountLimit = (limit: number | null) =>
+    limit === null ? "∞" : String(limit);
+  const displayDurationLimit = (limit: number) =>
+    Number.isFinite(limit) ? String(limit) : "∞";
   const refDeckGroupHints = {
-    image: `${referenceImages.length}/${maxImageCount}`,
-    video: `${referenceVideos.length}/${maxVideoCount} · ${totalVideoRefSeconds}/${maxVideoTotalSec}s`,
-    audio: `${referenceAudios.length}/${maxAudioCount} · ${totalAudioRefSeconds}/${maxAudioTotalSec}s`,
+    image: `${referenceImages.length}/${displayCountLimit(referenceCapabilities.maxReferenceImages)}`,
+    video: `${referenceVideos.length}/${displayCountLimit(referenceCapabilities.maxReferenceVideos)} · ${totalVideoRefSeconds}/${displayDurationLimit(maxVideoTotalSec)}s`,
+    audio: `${referenceAudios.length}/${displayCountLimit(referenceCapabilities.maxReferenceAudios)} · ${totalAudioRefSeconds}/${displayDurationLimit(maxAudioTotalSec)}s`,
   };
 
   const renderReferenceDeck = (alwaysExpanded?: boolean) => (
@@ -831,19 +901,23 @@ export const PromptBoxVideo = ({
     <KeyframeCards
       firstFrame={firstFrameItem}
       lastFrame={lastFrameItem}
-      showLastFrame={!!selectedModel?.endFrame}
-      onFirstAddActions={[
-        {
-          key: "upload-first",
-          label: "Upload",
-          onSelect: deck.openImageUpload,
-        },
-        {
-          key: "library-first",
-          label: "Pick from library",
-          onSelect: () => deck.openGallery("start"),
-        },
-      ]}
+      showLastFrame={referenceCapabilities.supportsEndFrame}
+      onFirstAddActions={
+        referenceCapabilities.supportsStartFrame
+          ? [
+              {
+                key: "upload-first",
+                label: "Upload",
+                onSelect: deck.openImageUpload,
+              },
+              {
+                key: "library-first",
+                label: "Pick from library",
+                onSelect: () => deck.openGallery("start"),
+              },
+            ]
+          : []
+      }
       onLastAddActions={[
         {
           key: "upload-last",
@@ -1118,7 +1192,17 @@ export const PromptBoxVideo = ({
       return;
     }
 
-    if (selectedModel?.requiresImage && referenceImages.length === 0) {
+    const requestReferenceProjection = projectPromptVideoReferences(
+      selectedModel,
+      usePromptVideoStore.getState(),
+    );
+    const requestIsReferenceMode =
+      requestReferenceProjection.inputMode === "reference";
+
+    if (
+      selectedModel.requiresImage &&
+      requestReferenceProjection.referenceImages.length === 0
+    ) {
       console.warn("Cannot generate video: no reference image provided");
       toast.error("Please add a starting frame image to generate video");
       return;
@@ -1129,11 +1213,11 @@ export const PromptBoxVideo = ({
       {
         storedDuration: duration,
         pendingDuration: localDuration,
-        effectiveReferenceMode: isReferenceMode,
-        imageCount: referenceImages.length,
-        hasEndFrameImage: !!endFrameImage,
-        videoCount: referenceVideos.length,
-        audioCount: referenceAudios.length,
+        effectiveReferenceMode: requestIsReferenceMode,
+        imageCount: requestReferenceProjection.referenceImages.length,
+        hasEndFrameImage: !!requestReferenceProjection.endFrameImage,
+        videoCount: requestReferenceProjection.referenceVideos.length,
+        audioCount: requestReferenceProjection.referenceAudios.length,
       },
       setDuration,
     );
@@ -1155,12 +1239,6 @@ export const PromptBoxVideo = ({
     const isSeedance2 = selectedModel.id === "seedance_2p0";
     const count = isSeedance2 ? generationCount : 1;
 
-    let imageMediaToken = undefined;
-
-    if (!isReferenceMode && referenceImages.length > 0) {
-      imageMediaToken = referenceImages[0].mediaToken;
-    }
-
     setTimeout(() => {
       // TODO(bt,2025-05-08): This is a hack so we don't accidentally wind up with a permanently disabled prompt box if
       // the backend hangs on a given request.
@@ -1171,11 +1249,8 @@ export const PromptBoxVideo = ({
     const buildRequest = (subscriberId: string): GenerateVideoRequest => {
       let request: GenerateVideoRequest = {
         model: selectedModel,
-        start_frame_image_media_token: imageMediaToken,
         prompt: prompt,
-        end_frame_image_media_token: isReferenceMode
-          ? undefined
-          : endFrameImage?.mediaToken,
+        ...requestReferenceProjection.requestMedia,
         frontend_caller: "image_to_video",
         frontend_subscriber_id: subscriberId,
       };
@@ -1186,27 +1261,6 @@ export const PromptBoxVideo = ({
 
       if (selectedModel.generateWithSound) {
         request.generate_audio = !!generateWithSound;
-      }
-
-      // Pass reference image tokens in reference mode
-      if (isReferenceMode && referenceImages.length > 0) {
-        request.reference_image_media_tokens = referenceImages.map(
-          (img) => img.mediaToken,
-        );
-      }
-
-      // Pass reference video tokens in reference mode
-      if (isReferenceMode && referenceVideos.length > 0) {
-        request.reference_video_media_tokens = referenceVideos.map(
-          (v) => v.mediaToken,
-        );
-      }
-
-      // Pass reference audio tokens in reference mode
-      if (isReferenceMode && referenceAudios.length > 0) {
-        request.reference_audio_media_tokens = referenceAudios.map(
-          (a) => a.mediaToken,
-        );
       }
 
       // Extract character tokens from @-mentions in prompt, resolving to
@@ -1289,7 +1343,9 @@ export const PromptBoxVideo = ({
 
     window.__storeTaskEnqueueMeta?.({
       prompt,
-      refImageUrls: referenceImages?.map((img) => img.url).filter(Boolean),
+      refImageUrls: requestReferenceProjection.referenceImages
+        .map((img) => img.url)
+        .filter(Boolean),
       modelType: (selectedModel as any)?.tauriId || String(selectedModel),
       timestamp: Date.now(),
     });
@@ -1389,13 +1445,6 @@ export const PromptBoxVideo = ({
   const modelNeedsAnImageButNoneAreSelected =
     selectedModel?.requiresImage && referenceImages.length === 0;
 
-  // Hide/clear ending frame if model doesn't support it
-  useEffect(() => {
-    if (selectedModel && !selectedModel.endFrame && endFrameImage) {
-      setEndFrameImage(undefined);
-    }
-  }, [selectedModel, endFrameImage, setEndFrameImage]);
-
   // Character button (seedance_2p0 only), reused in the fullscreen footer.
   const characterButtonEl =
     selectedModel?.id === "seedance_2p0" ? (
@@ -1436,7 +1485,7 @@ export const PromptBoxVideo = ({
         >
           <PromptBoxDropOverlay
             dragState={drop.dragState}
-            acceptsImages={maxImageCount > 0}
+            acceptsImages={referenceProjection.acceptsImages}
             acceptsVideos={dropAcceptsVideos}
             acceptsAudio={dropAcceptsAudio}
             keyframeMode={!isReferenceMode}

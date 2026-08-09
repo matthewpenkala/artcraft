@@ -3,6 +3,7 @@ import type { PopoverItem } from "@storyteller/ui-popover";
 import { BoxIcon, FilmIcon, ImageIcon } from "lucide-react";
 import {
   getCreatorListIcon,
+  getEffectiveVideoReferenceCapabilities,
   Model,
   ImageModel,
   VideoModel,
@@ -20,10 +21,13 @@ const withIcon = (creatorIcon: any, fallback: any) => creatorIcon || fallback;
 const videoCapabilityBadges = (model: Model) => {
   if (model.kind !== "video_model") return undefined;
   const video = model as VideoModel;
+  const referenceCapabilities = getEffectiveVideoReferenceCapabilities(video);
   const badges = [
     ...(video.generateWithSound ? [{ label: "Audio Support" }] : []),
     ...(video.endFrame ? [{ label: "Start/End" }] : []),
-    ...(video.supportsReferenceMode ? [{ label: "Reference" }] : []),
+    ...(referenceCapabilities.supportsReferenceMode
+      ? [{ label: "Reference" }]
+      : []),
   ];
   return badges.length > 0 ? badges : undefined;
 };

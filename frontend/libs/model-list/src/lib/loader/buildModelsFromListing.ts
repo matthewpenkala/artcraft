@@ -61,8 +61,10 @@ export interface ListingVideoModel extends ListingModelBase {
   ending_keyframe_supported?: boolean | null;
   image_references_supported?: boolean | null;
   image_references_max?: number | null;
+  video_references_supported?: boolean | null;
   video_references_max?: number | null;
   video_references_max_total_duration_seconds?: number | null;
+  audio_references_supported?: boolean | null;
   audio_references_max?: number | null;
   audio_references_max_total_duration_seconds?: number | null;
   show_generate_with_sound_toggle?: boolean | null;
@@ -270,7 +272,12 @@ const mergedVideoModel = (
       m.duration_seconds_max_with_image_references ??
       o?.maxDurationWithImageReferences,
     defaultDuration: m.duration_seconds_default ?? o?.defaultDuration,
-    supportsReferenceMode: m.image_references_supported ?? o?.supportsReferenceMode,
+    supportsImageReferences:
+      m.image_references_supported ?? o?.supportsImageReferences,
+    supportsVideoReferences:
+      m.video_references_supported ?? o?.supportsVideoReferences,
+    supportsAudioReferences:
+      m.audio_references_supported ?? o?.supportsAudioReferences,
     maxReferenceImages: m.image_references_max ?? o?.maxReferenceImages,
     maxReferenceVideos: m.video_references_max ?? o?.maxReferenceVideos,
     maxVideoRefDuration:

@@ -15,6 +15,16 @@ export {
   type VideoDurationProjection,
   type VideoDurationProjectionInputs,
 } from "./lib/classes/properties/VideoDuration.js";
+export {
+  getEffectiveVideoReferenceCapabilities,
+  projectVideoReferenceMedia,
+  type EffectiveVideoReferenceCapabilities,
+  type VideoReferenceCapabilities,
+  type VideoReferenceInputMode,
+  type VideoReferenceMediaProjection,
+  type VideoReferenceMediaState,
+  type VideoReferenceTimedMedia,
+} from "./lib/classes/properties/VideoReferenceCapabilities.js";
 export * from "./lib/classes/metadata/ModelCreator.js";
 export * from "./lib/classes/metadata/ModelCreatorIcons.js";
 export * from "./lib/classes/metadata/ModelCreatorIconForId.js";

@@ -56,7 +56,12 @@ const videoModel = {
   id: "duration-test-video",
   tauriId: "duration-test-video",
   sizeOptions: [],
+  startFrame: true,
+  endFrame: true,
   supportsReferenceMode: true,
+  supportsImageReferences: true,
+  supportsVideoReferences: true,
+  supportsAudioReferences: true,
   minDuration: 4,
   maxDuration: 15,
   maxDurationWithImageReferences: 10,
@@ -200,5 +205,74 @@ describe("video duration estimate consumer", () => {
     await runDebounce();
     expect(estimateVideoCost).not.toHaveBeenCalled();
     expect(result.current.isLoading).toBe(false);
+  });
+
+  it("derives estimate mode and duration from only media the model can send", async () => {
+    Object.assign(videoStore, {
+      duration: 15,
+      inputMode: "reference",
+      referenceImages: [{}],
+      endFrameImage: {},
+      referenceVideos: [{}],
+      referenceAudios: [{}],
+    });
+    const videoOnlyModel = {
+      ...videoModel,
+      supportsImageReferences: false,
+      supportsVideoReferences: true,
+      supportsAudioReferences: false,
+      supportsReferenceMode: true,
+      maxReferenceImages: 9,
+      maxReferenceVideos: 1,
+      maxReferenceAudios: 2,
+    } as unknown as Model;
+
+    renderHook(() =>
+      useVideoCostEstimate(ModelPage.ImageToVideo, videoOnlyModel, "artcraft"),
+    );
+    await runDebounce();
+
+    expect(estimateVideoCost).toHaveBeenCalledOnce();
+    expect(estimateVideoCost).toHaveBeenCalledWith(
+      expect.objectContaining({
+        generation_mode: "reference",
+        duration_seconds: 15,
+      }),
+    );
+  });
+
+  it("normalizes unsupported reference mode before estimating", async () => {
+    Object.assign(videoStore, {
+      duration: 15,
+      inputMode: "reference",
+      referenceImages: [{}],
+      referenceVideos: [{}],
+      referenceAudios: [{}],
+    });
+    const keyframeOnlyModel = {
+      ...videoModel,
+      startFrame: true,
+      supportsImageReferences: false,
+      supportsVideoReferences: false,
+      supportsAudioReferences: false,
+      supportsReferenceMode: false,
+    } as unknown as Model;
+
+    renderHook(() =>
+      useVideoCostEstimate(
+        ModelPage.ImageToVideo,
+        keyframeOnlyModel,
+        "artcraft",
+      ),
+    );
+    await runDebounce();
+
+    expect(estimateVideoCost).toHaveBeenCalledOnce();
+    expect(estimateVideoCost).toHaveBeenCalledWith(
+      expect.objectContaining({
+        generation_mode: "keyframe",
+        duration_seconds: 10,
+      }),
+    );
   });
 });

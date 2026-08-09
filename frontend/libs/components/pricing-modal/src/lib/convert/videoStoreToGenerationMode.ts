@@ -17,7 +17,10 @@ export function videoStoreToGenerationMode(
     if (referenceImages.length > 0 && endFrameImage) {
       return { type: "start_and_end_frame_to_video" };
     }
-    if (referenceImages.length > 0) {
+    // The estimate API has no distinct end-frame-only variant. An ending
+    // keyframe is still a single-image generation, so use the one-frame mode
+    // instead of incorrectly pricing it as text-to-video.
+    if (referenceImages.length > 0 || endFrameImage) {
       return { type: "start_frame_to_video" };
     }
   }

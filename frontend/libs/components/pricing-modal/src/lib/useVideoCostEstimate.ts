@@ -4,6 +4,7 @@ import {
   hasVideoDurationConfiguration,
   Model,
   projectVideoDuration,
+  projectVideoReferenceMedia,
   VideoModel,
 } from "@storyteller/model-list";
 import { GenerationProvider } from "@storyteller/api-enums";
@@ -36,19 +37,31 @@ export function useVideoCostEstimate(
   const inputMode = usePromptVideoStore((s) => s.inputMode);
   const referenceImages = usePromptVideoStore((s) => s.referenceImages);
   const endFrameImage = usePromptVideoStore((s) => s.endFrameImage);
+  const referenceVideos = usePromptVideoStore((s) => s.referenceVideos);
+  const referenceAudios = usePromptVideoStore((s) => s.referenceAudios);
   const generateWithSound = usePromptVideoStore((s) => s.generateWithSound);
   const videoModel =
     selectedModel?.kind === "video_model"
       ? (selectedModel as VideoModel)
       : null;
-  const effectiveReferenceMode =
-    inputMode === "reference" && !!videoModel?.supportsReferenceMode;
+  const referenceProjection = videoModel
+    ? projectVideoReferenceMedia(videoModel, {
+        inputMode,
+        referenceImages,
+        endFrameImage,
+        referenceVideos,
+        referenceAudios,
+      })
+    : null;
+  const effectiveReferenceMode = referenceProjection?.inputMode === "reference";
   const resolvedDuration = videoModel
     ? projectVideoDuration(videoModel, {
         storedDuration: duration,
         effectiveReferenceMode,
-        imageCount: referenceImages.length,
-        hasEndFrameImage: !!endFrameImage,
+        imageCount: referenceProjection?.referenceImages.length ?? 0,
+        hasEndFrameImage: !!referenceProjection?.endFrameImage,
+        videoCount: referenceProjection?.referenceVideos.length ?? 0,
+        audioCount: referenceProjection?.referenceAudios.length ?? 0,
       }).estimateDuration
     : null;
 
@@ -85,10 +98,10 @@ export function useVideoCostEstimate(
     );
     const commonResolution = stringToCommonVideoResolution(resolution);
     const generationMode = videoStoreToGenerationMode(
-      inputMode,
-      referenceImages,
-      endFrameImage,
-      videoModel.supportsReferenceMode,
+      referenceProjection?.inputMode ?? "keyframe",
+      referenceProjection?.referenceImages ?? [],
+      referenceProjection?.endFrameImage,
+      referenceProjection?.capabilities.supportsReferenceMode,
     );
     const provider =
       (selectedProvider as GenerationProvider | null | undefined) ??
@@ -144,6 +157,8 @@ export function useVideoCostEstimate(
     effectiveReferenceMode,
     referenceImages.length,
     !!endFrameImage,
+    referenceVideos,
+    referenceAudios,
     generateWithSound,
     setEstimatedCreditsForPage,
   ]);

@@ -1,5 +1,6 @@
 import { VideoModel } from "../classes/VideoModel.js";
 import { getVideoDurationConstraint } from "../classes/properties/VideoDuration.js";
+import { getEffectiveVideoReferenceCapabilities } from "../classes/properties/VideoReferenceCapabilities.js";
 import { ModelCreator } from "../classes/metadata/ModelCreator.js";
 import { buildVideoModelsFromListing } from "./buildModelsFromListing.js";
 
@@ -18,6 +19,27 @@ const overlayVideoModel = (durationOptions: number[] = [5, 10]) =>
     requiresImage: false,
     durationOptions,
     defaultDuration: 5,
+  });
+
+const overlayReferenceModel = () =>
+  new VideoModel({
+    id: "fictional_reference_video",
+    tauriId: "fictional_reference_video",
+    fullName: "Fictional reference video",
+    category: "video",
+    creator: ModelCreator.ArtCraft,
+    selectorName: "Fictional reference video",
+    selectorDescription: "Test fixture",
+    selectorBadges: [],
+    startFrame: true,
+    endFrame: true,
+    requiresImage: false,
+    supportsReferenceMode: true,
+    maxReferenceImages: 9,
+    maxReferenceVideos: 3,
+    maxVideoRefDuration: 15,
+    maxReferenceAudios: 2,
+    maxAudioRefDuration: 15,
   });
 
 describe("buildVideoModelsFromListing duration capabilities", () => {
@@ -154,4 +176,114 @@ describe("buildVideoModelsFromListing duration capabilities", () => {
     expect(model.durationOptions).toBeUndefined();
     expect(getVideoDurationConstraint(model)).toBeNull();
   });
+});
+
+describe("buildVideoModelsFromListing reference capabilities", () => {
+  it("keeps explicit false flags and zero limits authoritative over an overlay", () => {
+    const [model] = buildVideoModelsFromListing(
+      [overlayReferenceModel()],
+      [
+        {
+          model: "fictional_reference_video",
+          image_references_supported: false,
+          image_references_max: 0,
+          video_references_supported: false,
+          video_references_max: 0,
+          video_references_max_total_duration_seconds: 0,
+          audio_references_supported: false,
+          audio_references_max: 0,
+          audio_references_max_total_duration_seconds: 0,
+        },
+      ],
+      ["fictional_reference_video"],
+    );
+
+    expect(model).toMatchObject({
+      supportsImageReferences: false,
+      supportsVideoReferences: false,
+      supportsAudioReferences: false,
+      supportsReferenceMode: false,
+      maxReferenceImages: 0,
+      maxReferenceVideos: 0,
+      maxVideoRefDuration: 0,
+      maxReferenceAudios: 0,
+      maxAudioRefDuration: 0,
+    });
+    expect(getEffectiveVideoReferenceCapabilities(model)).toMatchObject({
+      maxReferenceImages: 0,
+      maxReferenceVideos: 0,
+      maxVideoRefDuration: 0,
+      maxReferenceAudios: 0,
+      maxAudioRefDuration: 0,
+    });
+  });
+
+  it("uses a known overlay only when listing fields are absent", () => {
+    const [model] = buildVideoModelsFromListing(
+      [overlayReferenceModel()],
+      [{ model: "fictional_reference_video" }],
+      ["fictional_reference_video"],
+    );
+
+    expect(model).toMatchObject({
+      supportsImageReferences: true,
+      supportsVideoReferences: true,
+      supportsAudioReferences: true,
+      supportsReferenceMode: true,
+      maxReferenceImages: 9,
+      maxReferenceVideos: 3,
+      maxReferenceAudios: 2,
+    });
+  });
+
+  it("does not invent reference capabilities for an unknown server-only model", () => {
+    const [model] = buildVideoModelsFromListing(
+      [],
+      [{ model: "server_only_video" }],
+      ["server_only_video"],
+    );
+
+    expect(model).toMatchObject({
+      supportsImageReferences: false,
+      supportsVideoReferences: false,
+      supportsAudioReferences: false,
+      supportsReferenceMode: false,
+    });
+    expect(getEffectiveVideoReferenceCapabilities(model)).toMatchObject({
+      maxReferenceImages: 0,
+      maxReferenceVideos: 0,
+      maxVideoRefDuration: 0,
+      maxReferenceAudios: 0,
+      maxAudioRefDuration: 0,
+    });
+  });
+
+  it.each([
+    ["image", true, false, false],
+    ["video", false, true, false],
+    ["audio", false, false, true],
+  ])(
+    "hydrates %s reference support independently",
+    (_label, image, video, audio) => {
+      const [model] = buildVideoModelsFromListing(
+        [],
+        [
+          {
+            model: "independent_reference_video",
+            image_references_supported: image,
+            video_references_supported: video,
+            audio_references_supported: audio,
+          },
+        ],
+        ["independent_reference_video"],
+      );
+
+      expect(model).toMatchObject({
+        supportsImageReferences: image,
+        supportsVideoReferences: video,
+        supportsAudioReferences: audio,
+        supportsReferenceMode: true,
+      });
+    },
+  );
 });

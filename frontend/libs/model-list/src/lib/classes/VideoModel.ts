@@ -48,8 +48,13 @@ export class VideoModel extends Model {
   // Default duration in seconds
   readonly defaultDuration?: number;
 
-  // Whether the model supports multi-image reference mode
-  readonly supportsReferenceMode?: boolean;
+  // Independent media capabilities for reference mode
+  readonly supportsImageReferences: boolean;
+  readonly supportsVideoReferences: boolean;
+  readonly supportsAudioReferences: boolean;
+
+  // Whether the model supports any reference-mode medium
+  readonly supportsReferenceMode: boolean;
 
   // Maximum number of reference images in reference mode
   readonly maxReferenceImages?: number;
@@ -104,6 +109,11 @@ export class VideoModel extends Model {
     maxDuration?: number;
     maxDurationWithImageReferences?: number;
     defaultDuration?: number;
+    supportsImageReferences?: boolean;
+    supportsVideoReferences?: boolean;
+    supportsAudioReferences?: boolean;
+    /** Legacy aggregate used by static overlays while they migrate to the
+     * independent media flags. */
     supportsReferenceMode?: boolean;
     maxReferenceImages?: number;
     maxReferenceVideos?: number;
@@ -152,7 +162,23 @@ export class VideoModel extends Model {
     this.defaultDuration = isValidVideoDuration(args.defaultDuration)
       ? args.defaultDuration
       : undefined;
-    this.supportsReferenceMode = args.supportsReferenceMode;
+    const legacyReferenceMode = args.supportsReferenceMode === true;
+    this.supportsImageReferences =
+      args.supportsImageReferences ?? legacyReferenceMode;
+    this.supportsVideoReferences =
+      args.supportsVideoReferences ??
+      (legacyReferenceMode &&
+        typeof args.maxReferenceVideos === "number" &&
+        args.maxReferenceVideos > 0);
+    this.supportsAudioReferences =
+      args.supportsAudioReferences ??
+      (legacyReferenceMode &&
+        typeof args.maxReferenceAudios === "number" &&
+        args.maxReferenceAudios > 0);
+    this.supportsReferenceMode =
+      this.supportsImageReferences ||
+      this.supportsVideoReferences ||
+      this.supportsAudioReferences;
     this.maxReferenceImages = args.maxReferenceImages;
     this.maxReferenceVideos = args.maxReferenceVideos;
     this.maxVideoRefDuration = args.maxVideoRefDuration;
