@@ -45,12 +45,12 @@ describe("webapp upload media duration helpers", () => {
     { kind: "video", read: getVideoDurationFromUrl },
     { kind: "audio", read: getAudioDurationFromUrl },
   ])(
-    "keeps nearest-ms $kind metadata and returns zero on failure",
+    "keeps nearest-ms $kind metadata and returns null on failure",
     async ({ read }) => {
       mockMetadataDurations([14.9994, null]);
 
       await expect(read("https://cdn.example/valid")).resolves.toBe(14.999);
-      await expect(read("https://cdn.example/unreadable")).resolves.toBe(0);
+      await expect(read("https://cdn.example/unreadable")).resolves.toBeNull();
     },
   );
 
@@ -103,7 +103,7 @@ describe("webapp upload media duration helpers", () => {
       const result = read(new File(["media"], fileName, { type: mimeType }));
       await vi.advanceTimersByTimeAsync(10_000);
 
-      await expect(result).resolves.toBe(0);
+      await expect(result).resolves.toBeNull();
       expect(removeAttribute).toHaveBeenCalledOnce();
       expect(removeAttribute).toHaveBeenCalledWith("src");
       expect(captured.media?.onloadedmetadata).toBeNull();

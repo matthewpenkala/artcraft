@@ -2,6 +2,10 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { RecreatePayload } from "../../lib/recreate";
 import type { RefImage } from "../../components/prompt-box";
+import { reconcileOwnedMediaObjectUrls } from "@storyteller/common";
+
+const OBJECT_REFS_OWNER = Symbol("webapp-create-object-images");
+const OBJECT_INPUTS_OWNER = Symbol("webapp-create-object-inputs");
 
 // A generated 3D asset (mesh). Shape mirrors the image store's GeneratedImage so
 // the shared polling helpers can be reused; `cdn_url` here is the .glb file.
@@ -94,9 +98,26 @@ export const useCreateObjectStore = create<CreateObjectState>()(
 
       setUi: (patch) => set((s) => ({ ui: { ...s.ui, ...patch } })),
 
-      setReferenceImages: (images) => set({ referenceImages: images }),
+      setReferenceImages: (images) =>
+        set((state) => {
+          reconcileOwnedMediaObjectUrls(
+            OBJECT_REFS_OWNER,
+            state.referenceImages.map((reference) => reference.url),
+            images.map((reference) => reference.url),
+          );
+          return { referenceImages: images };
+        }),
 
-      setInputs: (patch) => set((s) => ({ inputs: { ...s.inputs, ...patch } })),
+      setInputs: (patch) =>
+        set((state) => {
+          const inputs = { ...state.inputs, ...patch };
+          reconcileOwnedMediaObjectUrls(
+            OBJECT_INPUTS_OWNER,
+            meshInputUrls(state.inputs),
+            meshInputUrls(inputs),
+          );
+          return { inputs };
+        }),
 
       setPendingRecreate: (payload) => set({ pendingRecreate: payload }),
 
@@ -167,3 +188,13 @@ export const useCreateObjectStore = create<CreateObjectState>()(
     },
   ),
 );
+
+function meshInputUrls(inputs: MeshInputsState): (string | undefined)[] {
+  return [
+    inputs.frontImage?.url,
+    inputs.backImage?.url,
+    inputs.leftImage?.url,
+    inputs.rightImage?.url,
+    inputs.inputMesh?.url,
+  ];
+}

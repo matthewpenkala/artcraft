@@ -4,9 +4,14 @@ import {
   DeckSlotCard,
   type DeckItem,
 } from "@storyteller/ui-promptbox";
+import { withTemporaryMediaObjectUrl } from "@storyteller/common";
 import type { MeshInputsState } from "../create-object-store";
 import type { MultiViewSlot } from "./MeshInputsRow";
-import { MESH_FILE_ACCEPT, uploadMeshFile, uploadViewImage } from "./mesh-upload";
+import {
+  MESH_FILE_ACCEPT,
+  uploadMeshFile,
+  uploadViewImage,
+} from "./mesh-upload";
 
 // Always-visible named slot cards (Front/Back/Left/Right angles + input mesh)
 // rendered beside the reference deck in the desktop prompt box — same design
@@ -54,11 +59,17 @@ export function MeshDeckSlots({
     if (viewInputRef.current) viewInputRef.current.value = "";
     if (!file) return;
     const target = VIEW_SLOTS.find((v) => v.slot === targetSlotRef.current)!;
-    const previewUrl = URL.createObjectURL(file);
-    setUploadingView({ slot: target.slot, previewUrl });
-    const image = await uploadViewImage(target.label, file);
-    URL.revokeObjectURL(previewUrl);
-    setUploadingView(null);
+    const image = await withTemporaryMediaObjectUrl(
+      file,
+      async (previewUrl) => {
+        setUploadingView({ slot: target.slot, previewUrl });
+        try {
+          return await uploadViewImage(target.label, file);
+        } finally {
+          setUploadingView(null);
+        }
+      },
+    );
     if (image) setInputs({ [target.key]: image });
   };
 
@@ -79,7 +90,12 @@ export function MeshDeckSlots({
         name: inputs.inputMesh.file?.name || "Mesh file",
       }
     : isUploadingMesh
-      ? { id: "uploading-mesh", kind: "mesh", name: "Mesh file", uploading: true }
+      ? {
+          id: "uploading-mesh",
+          kind: "mesh",
+          name: "Mesh file",
+          uploading: true,
+        }
       : undefined;
 
   return (

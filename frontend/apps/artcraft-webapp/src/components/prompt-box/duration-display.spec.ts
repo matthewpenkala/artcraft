@@ -43,18 +43,22 @@ describe("webapp reference duration display consumers", () => {
     ]) {
       expect(mediaReferenceRow).toContain(expression);
     }
-    expect(promptBox).toContain(
-      "formatMediaDurationSeconds(totalVideoRefSeconds)",
-    );
-    expect(promptBox).toContain(
-      "formatMediaDurationSeconds(totalAudioRefSeconds)",
-    );
+    expect(promptBox).toContain("formatMediaDurationSeconds(");
+    expect(promptBox).toContain("totalVideoRefDisplay");
+    expect(promptBox).toContain("totalAudioRefDisplay");
+    expect(createVideo).toContain("formatMediaDurationSeconds(remaining)");
+    expect(createVideo).toContain("remainingMediaDurationSeconds(");
+    expect(createVideo).toContain("appendProbedMediaReferenceBatch(");
     expect(createVideo).toContain(
-      "formatMediaDurationSeconds(rejection.remainingSeconds)",
+      'referenceOperationKey={`${selectedModel?.model ?? ""}:${isReferenceMode}`}',
     );
-    expect(createVideo).toContain("buildProbedTimedRefsToAdd(");
+    expect(createVideo.match(/referenceOperationKey=/g)).toHaveLength(1);
+    expect(createVideo).toContain(
+      "onReferenceFramesChange={setReferenceFrames}",
+    );
     expect(mediaReferenceRow).not.toContain("currentTotal + duration");
     expect(createVideo).not.toContain("total + duration");
+    expect(createVideo).not.toContain('new File([], "library-');
 
     const combined = `${mediaReferenceRow}\n${promptBox}`;
     expect(combined).not.toMatch(/\{(?:video|audio)\.duration\}s/);

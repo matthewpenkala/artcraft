@@ -1,3 +1,8 @@
+import {
+  createOwnedMediaObjectUrl,
+  discardOwnedMediaObjectUrl,
+} from "@storyteller/common";
+
 // Client-side video frame extraction: seek the <video> element, wait for the
 // frame to be presented, draw it to a canvas, and encode a PNG blob. No server
 // round-trips — but the video must not taint the canvas (cross-origin sources
@@ -94,7 +99,7 @@ export async function extractFrames(
     }
     return frames;
   } catch (error) {
-    frames.forEach((frame) => URL.revokeObjectURL(frame.objectUrl));
+    frames.forEach((frame) => discardOwnedMediaObjectUrl(frame.objectUrl));
     throw error;
   } finally {
     video.currentTime = originalTime;
@@ -209,10 +214,7 @@ async function drawFrame(
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   } catch (error) {
     if (error instanceof Error && error.name === "SecurityError") {
-      throw new FrameExtractionError(
-        "cors",
-        "Video is cross-origin protected",
-      );
+      throw new FrameExtractionError("cors", "Video is cross-origin protected");
     }
     throw new FrameExtractionError("decode", "Failed to draw video frame");
   }
@@ -231,7 +233,7 @@ async function drawFrame(
   return {
     id: crypto.randomUUID(),
     blob,
-    objectUrl: URL.createObjectURL(blob),
+    objectUrl: createOwnedMediaObjectUrl(blob),
     timestamp,
     width: canvas.width,
     height: canvas.height,

@@ -1,12 +1,23 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { GalleryItem, GalleryModal } from "@storyteller/ui-gallery-modal";
 import { downloadFileFromUrl, type UploadMediaFn } from "@storyteller/api";
 import { toast } from "@storyteller/ui-toaster";
 import {
   UploaderStates,
+  appendMediaReference,
+  createOwnedMediaObjectUrl,
+  discardOwnedMediaObjectUrl,
   mediaDurationLimitStatus,
-  probeMediaDurationFromFile,
-  probeMediaDurationFromUrl,
+  normalizeMediaDurationSeconds,
+  MEDIA_DURATION_PROBE_TIMEOUT_MS,
+  withTemporaryMediaObjectUrl,
 } from "@storyteller/common";
 import {
   AUDIO_FILE_ACCEPT,
@@ -44,6 +55,8 @@ export interface UseDeckMediaOptions<
    *  in the end-frame picker so it can't be re-picked into the same slot. */
   endFrameImage?: TImage;
   setEndFrameImage?: (image?: TImage) => void;
+  /** False while the host is not rendering/accepting an end keyframe. */
+  endFrameEnabled?: boolean;
   referenceVideos?: TVideo[];
   setReferenceVideos?: (videos: TVideo[]) => void;
   maxVideos?: number;
@@ -52,6 +65,8 @@ export interface UseDeckMediaOptions<
   setReferenceAudios?: (audios: TAudio[]) => void;
   maxAudios?: number;
   maxAudioTotalSec?: number;
+  /** Host model/mode identity; changing it invalidates all in-flight work. */
+  operationKey?: unknown;
   uploadImage?: UploadMediaFn;
   uploadVideo?: UploadMediaFn;
   uploadAudio?: UploadMediaFn;
@@ -74,17 +89,48 @@ const videoLimitMessage = (maxVideos: number, maxTotalSec: number) =>
 const randomTitle = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).substring(2, 15)}`;
 
-const getVideoDurationFromSrc = (src: string): Promise<number | null> =>
-  probeMediaDurationFromUrl("video", src);
+const MEDIA_METADATA_TIMEOUT_MS = MEDIA_DURATION_PROBE_TIMEOUT_MS;
 
-const getVideoDuration = (file: File): Promise<number | null> =>
-  probeMediaDurationFromFile("video", file);
+const getMediaDurationFromSrc = (
+  kind: "video" | "audio",
+  src: string,
+  signal?: AbortSignal,
+): Promise<number | null> =>
+  new Promise((resolve) => {
+    const media = document.createElement(kind);
+    let settled = false;
+    const finish = (duration: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", abort);
+      media.onloadedmetadata = null;
+      media.onerror = null;
+      media.removeAttribute("src");
+      resolve(duration);
+    };
+    const abort = () => finish(null);
+    const timeoutId = setTimeout(() => finish(null), MEDIA_METADATA_TIMEOUT_MS);
+    media.preload = "metadata";
+    media.onloadedmetadata = () =>
+      finish(normalizeMediaDurationSeconds(media.duration));
+    media.onerror = () => finish(null);
+    if (signal?.aborted) {
+      finish(null);
+      return;
+    }
+    signal?.addEventListener("abort", abort, { once: true });
+    media.src = src;
+  });
 
-const getAudioDurationFromSrc = (src: string): Promise<number | null> =>
-  probeMediaDurationFromUrl("audio", src);
-
-const getAudioDuration = (file: File): Promise<number | null> =>
-  probeMediaDurationFromFile("audio", file);
+const getFileDuration = (
+  kind: "video" | "audio",
+  file: File,
+  signal?: AbortSignal,
+): Promise<number | null> =>
+  withTemporaryMediaObjectUrl(file, (src) =>
+    getMediaDurationFromSrc(kind, src, signal),
+  );
 
 /**
  * Headless upload/limits/library state machine for the reference deck.
@@ -101,6 +147,7 @@ export function useDeckMedia<
   maxImages,
   endFrameImage,
   setEndFrameImage,
+  endFrameEnabled = true,
   referenceVideos = [],
   setReferenceVideos,
   maxVideos = 3,
@@ -109,6 +156,7 @@ export function useDeckMedia<
   setReferenceAudios,
   maxAudios = 2,
   maxAudioTotalSec = 15,
+  operationKey,
   uploadImage,
   uploadVideo,
   uploadAudio,
@@ -140,17 +188,264 @@ export function useDeckMedia<
   );
   const [isProcessingGallery, setIsProcessingGallery] = useState(false);
 
-  // Async upload completions must append to the freshest committed arrays,
-  // not the arrays captured when the upload started.
+  // Update these during render and immediately before publishing local
+  // changes. Async completions therefore reconcile against the latest state,
+  // including removals that happened while metadata/upload work was pending.
   const referenceImagesRef = useRef(referenceImages);
-  useEffect(() => {
-    referenceImagesRef.current = referenceImages;
-  }, [referenceImages]);
-
+  const referenceVideosRef = useRef(referenceVideos);
   const referenceAudiosRef = useRef(referenceAudios);
+  const imagePolicySignature = `${maxImages}`;
+  const videoPolicySignature = `${Boolean(setReferenceVideos)}:${maxVideos}:${maxVideoTotalSec}`;
+  const audioPolicySignature = `${Boolean(setReferenceAudios)}:${maxAudios}:${maxAudioTotalSec}`;
+  const previousImagePolicyRef = useRef(imagePolicySignature);
+  const previousVideoPolicyRef = useRef(videoPolicySignature);
+  const previousAudioPolicyRef = useRef(audioPolicySignature);
+  const previousImageOperationKeyRef = useRef(operationKey);
+  const previousVideoOperationKeyRef = useRef(operationKey);
+  const previousAudioOperationKeyRef = useRef(operationKey);
+  const limitsRef = useRef({
+    maxImages,
+    maxVideos,
+    maxVideoTotalSec,
+    maxAudios,
+    maxAudioTotalSec,
+  });
+  const settersRef = useRef({
+    setReferenceImages,
+    setEndFrameImage,
+    setReferenceVideos,
+    setReferenceAudios,
+  });
+  const endFrameEnabledRef = useRef(endFrameEnabled);
+  referenceImagesRef.current = referenceImages;
+  referenceVideosRef.current = referenceVideos;
+  referenceAudiosRef.current = referenceAudios;
+  limitsRef.current = {
+    maxImages,
+    maxVideos,
+    maxVideoTotalSec,
+    maxAudios,
+    maxAudioTotalSec,
+  };
+  settersRef.current = {
+    setReferenceImages,
+    setEndFrameImage,
+    setReferenceVideos,
+    setReferenceAudios,
+  };
+  endFrameEnabledRef.current = endFrameEnabled;
+
+  const publishImages = (next: TImage[]) => {
+    referenceImagesRef.current = next;
+    settersRef.current.setReferenceImages(next);
+  };
+  const publishVideos = (next: TVideo[]): boolean => {
+    const setter = settersRef.current.setReferenceVideos;
+    if (!setter) return false;
+    referenceVideosRef.current = next;
+    setter(next);
+    return true;
+  };
+  const publishAudios = (next: TAudio[]): boolean => {
+    const setter = settersRef.current.setReferenceAudios;
+    if (!setter) return false;
+    referenceAudiosRef.current = next;
+    setter(next);
+    return true;
+  };
+
+  const replaceImages = (next: TImage[]) => publishImages(next);
+  const replaceVideos = (next: TVideo[]) => publishVideos(next);
+  const replaceAudios = (next: TAudio[]) => publishAudios(next);
+
+  const removeReference = (id: string) => {
+    const images = referenceImagesRef.current;
+    if (images.some((image) => image.id === id)) {
+      publishImages(images.filter((image) => image.id !== id));
+      return;
+    }
+    const videos = referenceVideosRef.current;
+    if (videos.some((video) => video.id === id)) {
+      publishVideos(videos.filter((video) => video.id !== id));
+      return;
+    }
+    const audios = referenceAudiosRef.current;
+    if (audios.some((audio) => audio.id === id)) {
+      publishAudios(audios.filter((audio) => audio.id !== id));
+    }
+  };
+
+  const reorderImages = (from: number, to: number) => {
+    const current = referenceImagesRef.current;
+    if (
+      from === to ||
+      from < 0 ||
+      to < 0 ||
+      from >= current.length ||
+      to >= current.length
+    ) {
+      return;
+    }
+    const next = [...current];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    publishImages(next);
+  };
+
+  // Clear is an explicit cancellation boundary. Uploaders cannot be aborted,
+  // but their late callbacks must not repopulate a deck the user cleared.
+  const imageEpochRef = useRef(0);
+  const endFrameEpochRef = useRef(0);
+  const endGalleryEpochRef = useRef(0);
+  const videoGalleryEpochRef = useRef(0);
+  const audioGalleryEpochRef = useRef(0);
+  const videoEpochRef = useRef(0);
+  const audioEpochRef = useRef(0);
+  const pendingObjectUrlsRef = useRef(new Set<string>());
+  const pendingImageUrlsRef = useRef(new Set<string>());
+  const pendingImageReadersRef = useRef(new Map<FileReader, "start" | "end">());
+  const pendingEndEntryRef = useRef<DeckUploadEntry | null>(null);
+  const pendingVideoEntryRef = useRef<DeckUploadEntry | null>(null);
+  const pendingAudioEntryRef = useRef<DeckUploadEntry | null>(null);
+  const pendingProbeControllersRef = useRef(
+    new Map<
+      AbortController,
+      { kind: "video" | "audio"; source: "file" | "gallery" }
+    >(),
+  );
+  const videoOperationsRef = useRef<Promise<void>>(Promise.resolve());
+  const audioOperationsRef = useRef<Promise<void>>(Promise.resolve());
+  const mountedRef = useRef(true);
+
+  const abortPendingProbes = (
+    kind?: "video" | "audio",
+    source?: "file" | "gallery",
+  ) => {
+    for (const [controller, probe] of pendingProbeControllersRef.current) {
+      if (kind && probe.kind !== kind) continue;
+      if (source && probe.source !== source) continue;
+      controller.abort();
+      pendingProbeControllersRef.current.delete(controller);
+    }
+  };
+
+  const probeDuration = async (
+    kind: "video" | "audio",
+    src: string,
+  ): Promise<number | null> => {
+    const controller = new AbortController();
+    pendingProbeControllersRef.current.set(controller, {
+      kind,
+      source: "gallery",
+    });
+    try {
+      return await getMediaDurationFromSrc(kind, src, controller.signal);
+    } finally {
+      pendingProbeControllersRef.current.delete(controller);
+    }
+  };
+
+  const probeFileDuration = async (
+    kind: "video" | "audio",
+    file: File,
+  ): Promise<number | null> => {
+    const controller = new AbortController();
+    pendingProbeControllersRef.current.set(controller, {
+      kind,
+      source: "file",
+    });
+    try {
+      return await getFileDuration(kind, file, controller.signal);
+    } finally {
+      pendingProbeControllersRef.current.delete(controller);
+    }
+  };
+
+  const cancelEndFrameUpload = () => {
+    endFrameEpochRef.current++;
+    for (const [reader, target] of pendingImageReadersRef.current) {
+      if (target === "end") reader.abort();
+    }
+    for (const [reader, target] of pendingImageReadersRef.current) {
+      if (target === "end") pendingImageReadersRef.current.delete(reader);
+    }
+    const pending = pendingEndEntryRef.current;
+    pendingEndEntryRef.current = null;
+    if (pending) {
+      pendingObjectUrlsRef.current.delete(pending.previewUrl);
+      discardOwnedMediaObjectUrl(pending.previewUrl);
+    }
+    setUploadingEnd((current) =>
+      current && current.id === pending?.id ? null : current,
+    );
+  };
+
+  const clearReferences = (commit?: () => void) => {
+    imageEpochRef.current++;
+    endFrameEpochRef.current++;
+    videoEpochRef.current++;
+    audioEpochRef.current++;
+    videoOperationsRef.current = Promise.resolve();
+    audioOperationsRef.current = Promise.resolve();
+    abortPendingProbes();
+    for (const reader of pendingImageReadersRef.current.keys()) {
+      reader.abort();
+    }
+    pendingImageReadersRef.current.clear();
+    pendingEndEntryRef.current = null;
+    pendingVideoEntryRef.current = null;
+    pendingAudioEntryRef.current = null;
+    referenceImagesRef.current = [];
+    referenceVideosRef.current = [];
+    referenceAudiosRef.current = [];
+    for (const url of pendingObjectUrlsRef.current) {
+      discardOwnedMediaObjectUrl(url);
+    }
+    pendingObjectUrlsRef.current.clear();
+    setUploadingImages([]);
+    setUploadingEnd(null);
+    setUploadingVideo(null);
+    setUploadingAudio(null);
+    if (commit) {
+      commit();
+    } else {
+      setReferenceImages([]);
+      setEndFrameImage?.(undefined);
+      setReferenceVideos?.([]);
+      setReferenceAudios?.([]);
+    }
+  };
+
   useEffect(() => {
-    referenceAudiosRef.current = referenceAudios;
-  }, [referenceAudios]);
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      imageEpochRef.current++;
+      endFrameEpochRef.current++;
+      videoEpochRef.current++;
+      audioEpochRef.current++;
+      videoOperationsRef.current = Promise.resolve();
+      audioOperationsRef.current = Promise.resolve();
+      abortPendingProbes();
+      for (const reader of pendingImageReadersRef.current.keys()) {
+        reader.abort();
+      }
+      pendingImageReadersRef.current.clear();
+      pendingEndEntryRef.current = null;
+      pendingVideoEntryRef.current = null;
+      pendingAudioEntryRef.current = null;
+      for (const url of pendingObjectUrlsRef.current) {
+        discardOwnedMediaObjectUrl(url);
+      }
+      pendingObjectUrlsRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!endFrameEnabled) cancelEndFrameUpload();
+    // The cancellation boundary is the enabled-state transition itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endFrameEnabled]);
 
   // The hook only ever commits `{ id, url, file, mediaToken, duration? }`,
   // which is structurally assignable to both apps' ref types (desktop
@@ -158,29 +453,120 @@ export function useDeckMedia<
   const asImage = (img: {
     id: string;
     url: string;
-    file: File;
+    file?: File;
     mediaToken: string;
   }) => img as unknown as TImage;
   const asVideo = (video: {
     id: string;
     url: string;
-    file: File;
+    file?: File;
     mediaToken: string;
     duration: number;
   }) => video as unknown as TVideo;
   const asAudio = (audio: {
     id: string;
     url: string;
-    file: File;
+    file?: File;
     mediaToken: string;
     duration: number;
   }) => audio as unknown as TAudio;
 
-  const makeEntry = (file: File): DeckUploadEntry => ({
-    id: randomId(),
-    file,
-    previewUrl: URL.createObjectURL(file),
-  });
+  const makeEntry = (file: File): DeckUploadEntry => {
+    const previewUrl = createOwnedMediaObjectUrl(file);
+    pendingObjectUrlsRef.current.add(previewUrl);
+    return { id: randomId(), file, previewUrl };
+  };
+
+  const discardPendingUrl = (url: string) => {
+    pendingObjectUrlsRef.current.delete(url);
+    pendingImageUrlsRef.current.delete(url);
+    discardOwnedMediaObjectUrl(url);
+  };
+
+  const transferPendingUrl = (url: string) => {
+    pendingObjectUrlsRef.current.delete(url);
+    pendingImageUrlsRef.current.delete(url);
+  };
+
+  const cancelPendingImageOperations = () => {
+    imageEpochRef.current++;
+    for (const [reader, target] of pendingImageReadersRef.current) {
+      if (target === "start") reader.abort();
+    }
+    for (const [reader, target] of pendingImageReadersRef.current) {
+      if (target === "start") pendingImageReadersRef.current.delete(reader);
+    }
+    for (const url of pendingImageUrlsRef.current) {
+      discardPendingUrl(url);
+    }
+    pendingImageUrlsRef.current.clear();
+    setUploadingImages([]);
+  };
+
+  const cancelPendingVideoOperations = () => {
+    videoEpochRef.current++;
+    videoOperationsRef.current = Promise.resolve();
+    abortPendingProbes("video");
+    const pending = pendingVideoEntryRef.current;
+    pendingVideoEntryRef.current = null;
+    if (pending) discardPendingUrl(pending.previewUrl);
+    setUploadingVideo(null);
+  };
+
+  const cancelPendingAudioOperations = () => {
+    audioEpochRef.current++;
+    audioOperationsRef.current = Promise.resolve();
+    abortPendingProbes("audio");
+    const pending = pendingAudioEntryRef.current;
+    pendingAudioEntryRef.current = null;
+    if (pending) discardPendingUrl(pending.previewUrl);
+    setUploadingAudio(null);
+  };
+
+  useLayoutEffect(() => {
+    const policyChanged =
+      imagePolicySignature !== previousImagePolicyRef.current;
+    const operationChanged =
+      operationKey !== previousImageOperationKeyRef.current;
+    previousImagePolicyRef.current = imagePolicySignature;
+    previousImageOperationKeyRef.current = operationKey;
+    if (policyChanged || operationChanged) {
+      cancelPendingImageOperations();
+    }
+    if (operationChanged) {
+      cancelEndFrameUpload();
+    }
+    // The host's semantic model/mode identity and capability policy are
+    // cancellation boundaries. Ordinary reference-array edits intentionally
+    // remain fresh-state reconciliation inputs for pending uploads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imagePolicySignature, operationKey]);
+
+  useLayoutEffect(() => {
+    const policyChanged =
+      videoPolicySignature !== previousVideoPolicyRef.current;
+    const operationChanged =
+      operationKey !== previousVideoOperationKeyRef.current;
+    previousVideoPolicyRef.current = videoPolicySignature;
+    previousVideoOperationKeyRef.current = operationKey;
+    if (policyChanged || operationChanged) {
+      cancelPendingVideoOperations();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoPolicySignature, operationKey]);
+
+  useLayoutEffect(() => {
+    const policyChanged =
+      audioPolicySignature !== previousAudioPolicyRef.current;
+    const operationChanged =
+      operationKey !== previousAudioOperationKeyRef.current;
+    previousAudioPolicyRef.current = audioPolicySignature;
+    previousAudioOperationKeyRef.current = operationKey;
+    if (policyChanged || operationChanged) {
+      cancelPendingAudioOperations();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audioPolicySignature, operationKey]);
 
   const openImageUpload = () => {
     imageTargetRef.current = "start";
@@ -197,16 +583,27 @@ export function useDeckMedia<
   const openAnyUpload = () => anyFileInputRef.current?.click();
 
   const openGallery = (target: "start" | "end" | "video" | "audio") => {
+    if (target === "end") {
+      if (!endFrameEnabledRef.current) return;
+      endGalleryEpochRef.current = endFrameEpochRef.current;
+    }
     setGalleryTarget(target);
     setIsGalleryModalOpen(true);
   };
 
-  const processImageFiles = (
-    files: File[],
-    uploadTarget: "start" | "end",
-  ) => {
-    const currentCount = referenceImages.length + uploadingImages.length;
-    const availableSlots = Math.max(0, maxImages - currentCount);
+  const processImageFiles = (files: File[], uploadTarget: "start" | "end") => {
+    if (uploadTarget === "end") {
+      cancelEndFrameUpload();
+      if (!endFrameEnabledRef.current) return;
+    }
+    const operationEpoch = imageEpochRef.current;
+    const endOperationEpoch = endFrameEpochRef.current;
+    const currentCount =
+      referenceImagesRef.current.length + uploadingImages.length;
+    const availableSlots = Math.max(
+      0,
+      limitsRef.current.maxImages - currentCount,
+    );
     if (availableSlots <= 0 && uploadTarget !== "end") {
       return;
     }
@@ -219,21 +616,45 @@ export function useDeckMedia<
     filesToProcess.forEach((file) => {
       const entry = makeEntry(file);
       if (uploadTarget === "end") {
+        pendingEndEntryRef.current = entry;
         setUploadingEnd(entry);
       } else {
+        pendingImageUrlsRef.current.add(entry.previewUrl);
         setUploadingImages((prev) => [...prev, entry]);
       }
 
+      let settled = false;
       const finishEntry = () => {
-        URL.revokeObjectURL(entry.previewUrl);
+        discardPendingUrl(entry.previewUrl);
+        if (!mountedRef.current) return;
         if (uploadTarget === "end") {
-          setUploadingEnd(null);
+          if (pendingEndEntryRef.current?.id === entry.id) {
+            pendingEndEntryRef.current = null;
+          }
+          setUploadingEnd((current) =>
+            current?.id === entry.id ? null : current,
+          );
         } else {
           setUploadingImages((prev) => prev.filter((e) => e.id !== entry.id));
         }
       };
 
       const commit = (url: string, mediaToken: string) => {
+        if (settled) return;
+        if (operationEpoch !== imageEpochRef.current) {
+          reject();
+          return;
+        }
+        if (
+          uploadTarget === "end" &&
+          (endOperationEpoch !== endFrameEpochRef.current ||
+            !endFrameEnabledRef.current ||
+            !settersRef.current.setEndFrameImage)
+        ) {
+          reject();
+          return;
+        }
+        settled = true;
         const referenceImage = asImage({
           id: randomId(),
           url,
@@ -242,33 +663,76 @@ export function useDeckMedia<
         });
         finishEntry();
         if (uploadTarget === "end") {
-          setEndFrameImage?.(referenceImage);
+          settersRef.current.setEndFrameImage?.(referenceImage);
         } else {
-          setReferenceImages([...referenceImagesRef.current, referenceImage]);
+          const current = referenceImagesRef.current;
+          if (current.length >= limitsRef.current.maxImages) return;
+          publishImages([...current, referenceImage]);
         }
       };
 
+      const reject = () => {
+        if (settled) return;
+        settled = true;
+        finishEntry();
+      };
+
       const reader = new FileReader();
+      pendingImageReadersRef.current.set(reader, uploadTarget);
       reader.onloadend = async () => {
+        pendingImageReadersRef.current.delete(reader);
+        if (
+          operationEpoch !== imageEpochRef.current ||
+          (uploadTarget === "end" &&
+            (endOperationEpoch !== endFrameEpochRef.current ||
+              !endFrameEnabledRef.current))
+        ) {
+          reject();
+          return;
+        }
+        if (typeof reader.result !== "string") {
+          reject();
+          return;
+        }
         if (uploadImage) {
-          await uploadImage({
-            title: randomTitle("reference-image"),
-            assetFile: file,
-            progressCallback: (newState) => {
-              if (newState.status === UploaderStates.success && newState.data) {
-                commit(reader.result as string, newState.data);
-              } else if (
-                newState.status === UploaderStates.assetError ||
-                newState.status === UploaderStates.imageCreateError
-              ) {
-                finishEntry();
-              }
-            },
-          });
+          try {
+            await uploadImage({
+              title: randomTitle("reference-image"),
+              assetFile: file,
+              progressCallback: (newState) => {
+                if (
+                  newState.status === UploaderStates.success &&
+                  newState.data
+                ) {
+                  commit(reader.result as string, newState.data);
+                } else if (
+                  newState.status === UploaderStates.assetError ||
+                  newState.status === UploaderStates.imageCreateError
+                ) {
+                  reject();
+                }
+              },
+            });
+          } catch {
+            if (mountedRef.current) {
+              toast.error("Failed to upload image. Please try again.");
+            }
+          } finally {
+            // A rejected upload, or one that resolves without a terminal
+            // callback, must not leave a spinner or preview URL behind.
+            reject();
+          }
         } else {
           commit(reader.result as string, "");
         }
-
+      };
+      reader.onerror = () => {
+        pendingImageReadersRef.current.delete(reader);
+        reject();
+      };
+      reader.onabort = () => {
+        pendingImageReadersRef.current.delete(reader);
+        reject();
       };
       reader.readAsDataURL(file);
     });
@@ -281,45 +745,88 @@ export function useDeckMedia<
     processImageFiles(files, imageTargetRef.current);
   };
 
-  const processVideoFiles = async (files: File[]) => {
-    // Snapshot the committed state at call time so removes that happened
-    // before this call are respected (don't re-read a stale ref).
-    const baseVideos = [...referenceVideos];
-    const availableSlots = Math.max(0, maxVideos - baseVideos.length);
+  const processVideoFilesNow = async (
+    files: File[],
+    operationEpoch: number,
+  ) => {
+    if (
+      operationEpoch !== videoEpochRef.current ||
+      !settersRef.current.setReferenceVideos
+    ) {
+      return;
+    }
+    const baseVideos = referenceVideosRef.current;
+    const initialLimits = limitsRef.current;
+    const availableSlots = Math.max(
+      0,
+      initialLimits.maxVideos - baseVideos.length,
+    );
     if (availableSlots <= 0) {
-      toast.error(videoLimitMessage(maxVideos, maxVideoTotalSec), {
-        id: "video-ref-limit",
-      });
+      toast.error(
+        videoLimitMessage(
+          initialLimits.maxVideos,
+          initialLimits.maxVideoTotalSec,
+        ),
+        { id: "video-ref-limit" },
+      );
       return;
     }
 
     const filesToProcess = files.slice(0, availableSlots);
-    let committed = baseVideos;
-
     for (const file of filesToProcess) {
-      const duration = await getVideoDuration(file);
+      const duration = await probeFileDuration("video", file);
+      if (operationEpoch !== videoEpochRef.current) return;
       if (duration == null) {
         toast.error("Could not read video duration", {
           id: "video-ref-duration",
         });
         continue;
       }
-      if (
-        mediaDurationLimitStatus(
-          [...committed.map((video) => video.duration), duration],
-          maxVideoTotalSec,
-        ) !== "within-limit"
-      ) {
-        toast.error(`Total video duration cannot exceed ${maxVideoTotalSec}s`, {
-          id: "video-ref-limit",
+      const currentLimits = limitsRef.current;
+      if (referenceVideosRef.current.length >= currentLimits.maxVideos) {
+        toast.error(
+          videoLimitMessage(
+            currentLimits.maxVideos,
+            currentLimits.maxVideoTotalSec,
+          ),
+          { id: "video-ref-limit" },
+        );
+        break;
+      }
+      const limitStatus = mediaDurationLimitStatus(
+        [
+          ...referenceVideosRef.current.map((video) => video.duration),
+          duration,
+        ],
+        currentLimits.maxVideoTotalSec,
+      );
+
+      if (limitStatus === "invalid") {
+        toast.error("Could not verify video duration", {
+          id: "video-ref-duration",
         });
+        break;
+      }
+      if (limitStatus === "over-limit") {
+        toast.error(
+          `Total video duration cannot exceed ${currentLimits.maxVideoTotalSec}s`,
+          { id: "video-ref-limit" },
+        );
         break;
       }
 
       const entry = makeEntry(file);
+      pendingVideoEntryRef.current = entry;
       setUploadingVideo(entry);
+      let previewCommitted = false;
+      let settled = false;
 
       const commit = (mediaToken: string) => {
+        if (settled) return;
+        if (operationEpoch !== videoEpochRef.current) {
+          reject(false);
+          return;
+        }
         // Reuse the entry's object URL as the committed thumbnail so it
         // stays alive exactly as long as the ref does.
         const refVideo = asVideo({
@@ -329,32 +836,113 @@ export function useDeckMedia<
           mediaToken,
           duration,
         });
-        setUploadingVideo(null);
-        committed = [...committed, refVideo];
-        setReferenceVideos?.(committed);
+        const latestLimits = limitsRef.current;
+        const result = appendMediaReference(
+          referenceVideosRef.current,
+          refVideo,
+          {
+            maxCount: latestLimits.maxVideos,
+            maxTotalSeconds: latestLimits.maxVideoTotalSec,
+          },
+        );
+        settled = true;
+        if (pendingVideoEntryRef.current?.id === entry.id) {
+          pendingVideoEntryRef.current = null;
+        }
+        if (mountedRef.current) {
+          setUploadingVideo((current) =>
+            current?.id === entry.id ? null : current,
+          );
+        }
+        if (result.status === "added") {
+          if (publishVideos(result.next)) {
+            previewCommitted = true;
+            transferPendingUrl(entry.previewUrl);
+          } else {
+            discardPendingUrl(entry.previewUrl);
+          }
+        } else if (
+          result.status === "over-count" ||
+          result.status === "over-duration"
+        ) {
+          toast.error(
+            videoLimitMessage(
+              latestLimits.maxVideos,
+              latestLimits.maxVideoTotalSec,
+            ),
+            { id: "video-ref-limit" },
+          );
+        } else if (result.status === "invalid-duration") {
+          toast.error("Could not verify video duration", {
+            id: "video-ref-duration",
+          });
+        }
+        if (result.status !== "added") {
+          discardPendingUrl(entry.previewUrl);
+        }
+      };
+
+      const reject = (showError: boolean) => {
+        if (settled) return;
+        settled = true;
+        if (pendingVideoEntryRef.current?.id === entry.id) {
+          pendingVideoEntryRef.current = null;
+        }
+        if (mountedRef.current) {
+          setUploadingVideo((current) =>
+            current?.id === entry.id ? null : current,
+          );
+        }
+        if (showError && mountedRef.current) {
+          toast.error("Failed to upload video. Please upload an MP4 file.");
+        }
       };
 
       if (uploadVideo) {
-        await uploadVideo({
-          title: randomTitle("reference-video"),
-          assetFile: file,
-          progressCallback: (newState) => {
-            if (newState.status === UploaderStates.success && newState.data) {
-              commit(newState.data);
-            } else if (
-              newState.status === UploaderStates.assetError ||
-              newState.status === UploaderStates.imageCreateError
-            ) {
-              URL.revokeObjectURL(entry.previewUrl);
-              setUploadingVideo(null);
-              toast.error("Failed to upload video. Please upload an MP4 file.");
+        try {
+          await uploadVideo({
+            title: randomTitle("reference-video"),
+            assetFile: file,
+            progressCallback: (newState) => {
+              if (newState.status === UploaderStates.success && newState.data) {
+                commit(newState.data);
+              } else if (
+                newState.status === UploaderStates.assetError ||
+                newState.status === UploaderStates.imageCreateError
+              ) {
+                reject(true);
+              }
+            },
+          });
+        } catch {
+          reject(true);
+        } finally {
+          if (!previewCommitted) {
+            reject(false);
+            discardPendingUrl(entry.previewUrl);
+            if (mountedRef.current) {
+              setUploadingVideo((current) =>
+                current?.id === entry.id ? null : current,
+              );
             }
-          },
-        });
+          }
+        }
       } else {
         commit("");
       }
     }
+  };
+
+  const processVideoFiles = (files: File[]): Promise<void> => {
+    const operationEpoch = videoEpochRef.current;
+    const operation = videoOperationsRef.current.then(() =>
+      processVideoFilesNow(files, operationEpoch),
+    );
+    videoOperationsRef.current = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   };
 
   const handleVideoFileUpload = async (
@@ -366,45 +954,79 @@ export function useDeckMedia<
     await processVideoFiles(files);
   };
 
-  const processAudioFiles = async (files: File[]) => {
+  const processAudioFilesNow = async (
+    files: File[],
+    operationEpoch: number,
+  ) => {
+    if (
+      operationEpoch !== audioEpochRef.current ||
+      !settersRef.current.setReferenceAudios
+    ) {
+      return;
+    }
     const audioFiles = files.filter(isAudioFile);
     if (audioFiles.length < files.length) {
       toast.error(AUDIO_FILE_TYPE_ERROR, { id: "audio-ref-type" });
     }
     if (audioFiles.length === 0) return;
 
-    const availableSlots = Math.max(0, maxAudios - referenceAudios.length);
+    const baseAudios = referenceAudiosRef.current;
+    const initialLimits = limitsRef.current;
+    const availableSlots = Math.max(
+      0,
+      initialLimits.maxAudios - baseAudios.length,
+    );
     if (availableSlots <= 0) {
       return;
     }
 
     const filesToProcess = audioFiles.slice(0, availableSlots);
-
     for (const file of filesToProcess) {
-      const duration = await getAudioDuration(file);
+      const duration = await probeFileDuration("audio", file);
+      if (operationEpoch !== audioEpochRef.current) return;
       if (duration == null) {
         toast.error("Could not read audio duration", {
           id: "audio-ref-duration",
         });
         continue;
       }
-      if (
-        mediaDurationLimitStatus(
-          [
-            ...referenceAudiosRef.current.map((audio) => audio.duration),
-            duration,
-          ],
-          maxAudioTotalSec,
-        ) !== "within-limit"
-      ) {
-        toast.error(`Total audio duration cannot exceed ${maxAudioTotalSec}s`);
+      const currentLimits = limitsRef.current;
+      if (referenceAudiosRef.current.length >= currentLimits.maxAudios) {
+        break;
+      }
+      const limitStatus = mediaDurationLimitStatus(
+        [
+          ...referenceAudiosRef.current.map((audio) => audio.duration),
+          duration,
+        ],
+        currentLimits.maxAudioTotalSec,
+      );
+
+      if (limitStatus === "invalid") {
+        toast.error("Could not verify audio duration", {
+          id: "audio-ref-duration",
+        });
+        break;
+      }
+      if (limitStatus === "over-limit") {
+        toast.error(
+          `Total audio duration cannot exceed ${currentLimits.maxAudioTotalSec}s`,
+        );
         break;
       }
 
       const entry = makeEntry(file);
+      pendingAudioEntryRef.current = entry;
       setUploadingAudio(entry);
+      let previewCommitted = false;
+      let settled = false;
 
       const commit = (mediaToken: string) => {
+        if (settled) return;
+        if (operationEpoch !== audioEpochRef.current) {
+          reject();
+          return;
+        }
         const refAudio = asAudio({
           id: randomId(),
           url: entry.previewUrl,
@@ -412,30 +1034,109 @@ export function useDeckMedia<
           mediaToken,
           duration,
         });
-        setUploadingAudio(null);
-        setReferenceAudios?.([...referenceAudiosRef.current, refAudio]);
+        const latestLimits = limitsRef.current;
+        const result = appendMediaReference(
+          referenceAudiosRef.current,
+          refAudio,
+          {
+            maxCount: latestLimits.maxAudios,
+            maxTotalSeconds: latestLimits.maxAudioTotalSec,
+          },
+        );
+        settled = true;
+        if (pendingAudioEntryRef.current?.id === entry.id) {
+          pendingAudioEntryRef.current = null;
+        }
+        if (mountedRef.current) {
+          setUploadingAudio((current) =>
+            current?.id === entry.id ? null : current,
+          );
+        }
+        if (result.status === "added") {
+          if (publishAudios(result.next)) {
+            previewCommitted = true;
+            transferPendingUrl(entry.previewUrl);
+          } else {
+            discardPendingUrl(entry.previewUrl);
+          }
+        } else if (
+          result.status === "over-count" ||
+          result.status === "over-duration"
+        ) {
+          toast.error(
+            `Total audio duration cannot exceed ${latestLimits.maxAudioTotalSec}s`,
+          );
+        } else if (result.status === "invalid-duration") {
+          toast.error("Could not verify audio duration", {
+            id: "audio-ref-duration",
+          });
+        }
+        if (result.status !== "added") {
+          discardPendingUrl(entry.previewUrl);
+        }
+      };
+
+      const reject = () => {
+        if (settled) return;
+        settled = true;
+        if (pendingAudioEntryRef.current?.id === entry.id) {
+          pendingAudioEntryRef.current = null;
+        }
+        if (mountedRef.current) {
+          setUploadingAudio((current) =>
+            current?.id === entry.id ? null : current,
+          );
+        }
       };
 
       if (uploadAudio) {
-        await uploadAudio({
-          title: randomTitle("reference-audio"),
-          assetFile: file,
-          progressCallback: (newState) => {
-            if (newState.status === UploaderStates.success && newState.data) {
-              commit(newState.data);
-            } else if (
-              newState.status === UploaderStates.assetError ||
-              newState.status === UploaderStates.imageCreateError
-            ) {
-              URL.revokeObjectURL(entry.previewUrl);
-              setUploadingAudio(null);
+        try {
+          await uploadAudio({
+            title: randomTitle("reference-audio"),
+            assetFile: file,
+            progressCallback: (newState) => {
+              if (newState.status === UploaderStates.success && newState.data) {
+                commit(newState.data);
+              } else if (
+                newState.status === UploaderStates.assetError ||
+                newState.status === UploaderStates.imageCreateError
+              ) {
+                reject();
+              }
+            },
+          });
+        } catch {
+          reject();
+          if (mountedRef.current) {
+            toast.error("Failed to upload audio. Please try again.");
+          }
+        } finally {
+          if (!previewCommitted) {
+            reject();
+            discardPendingUrl(entry.previewUrl);
+            if (mountedRef.current) {
+              setUploadingAudio((current) =>
+                current?.id === entry.id ? null : current,
+              );
             }
-          },
-        });
+          }
+        }
       } else {
         commit("");
       }
     }
+  };
+
+  const processAudioFiles = (files: File[]): Promise<void> => {
+    const operationEpoch = audioEpochRef.current;
+    const operation = audioOperationsRef.current.then(() =>
+      processAudioFilesNow(files, operationEpoch),
+    );
+    audioOperationsRef.current = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   };
 
   const handleAudioFileUpload = async (
@@ -475,6 +1176,17 @@ export function useDeckMedia<
   ].join(",");
 
   const handleGalleryClose = () => {
+    if (!mountedRef.current) return;
+    if (galleryTarget === "video") {
+      videoGalleryEpochRef.current++;
+      abortPendingProbes("video", "gallery");
+    } else if (galleryTarget === "audio") {
+      audioGalleryEpochRef.current++;
+      abortPendingProbes("audio", "gallery");
+    } else if (galleryTarget === "end") {
+      endGalleryEpochRef.current++;
+    }
+    setIsProcessingGallery(false);
     setIsGalleryModalOpen(false);
     setSelectedGalleryImages([]);
   };
@@ -499,9 +1211,9 @@ export function useDeckMedia<
 
   const handleGalleryImages = async (selectedItems: GalleryItem[]) => {
     if (galleryTarget === "video") {
-      // Snapshot committed state at call time to avoid re-reading a stale
-      // ref after removes.
-      const baseVideos = [...referenceVideos];
+      const operationEpoch = videoEpochRef.current;
+      const galleryEpoch = videoGalleryEpochRef.current;
+      const baseVideos = referenceVideosRef.current;
       const availableSlots = Math.max(0, maxVideos - baseVideos.length);
       if (availableSlots <= 0) {
         toast.error(videoLimitMessage(maxVideos, maxVideoTotalSec), {
@@ -518,11 +1230,19 @@ export function useDeckMedia<
 
       setIsProcessingGallery(true);
       try {
-        // Parallelize duration probes — sequential metadata loads was the
-        // source of the perceived lag on the "Use selected" click.
+        // Generation measures the current file, so the quote and cap checks
+        // always probe that same URL rather than trusting stale list metadata.
         const durations = await Promise.all(
-          itemsToProcess.map((item) => getVideoDurationFromSrc(item.fullImage)),
+          itemsToProcess.map((item) => probeDuration("video", item.fullImage)),
         );
+        if (
+          operationEpoch !== videoEpochRef.current ||
+          galleryEpoch !== videoGalleryEpochRef.current
+        ) {
+          handleGalleryClose();
+          return;
+        }
+
         const unreadableCount = durations.filter(
           (duration) => duration == null,
         ).length;
@@ -533,52 +1253,65 @@ export function useDeckMedia<
           );
         }
 
-        const newVideos: TVideo[] = [];
+        let nextVideos = referenceVideosRef.current;
         let exceeded = false;
         for (let i = 0; i < itemsToProcess.length; i++) {
+          if (
+            operationEpoch !== videoEpochRef.current ||
+            galleryEpoch !== videoGalleryEpochRef.current
+          ) {
+            handleGalleryClose();
+            return;
+          }
           const item = itemsToProcess[i]!;
           const duration = durations[i]!;
           if (duration == null) continue;
+          const candidate = asVideo({
+            id: randomId(),
+            url: item.fullImage,
+            mediaToken: item.id,
+            duration,
+          });
+          const currentLimits = limitsRef.current;
+          const result = appendMediaReference(nextVideos, candidate, {
+            maxCount: currentLimits.maxVideos,
+            maxTotalSeconds: currentLimits.maxVideoTotalSec,
+          });
+          if (result.status === "invalid-duration") {
+            toast.error("Could not verify video duration", {
+              id: "video-ref-duration",
+            });
+            break;
+          }
           if (
-            mediaDurationLimitStatus(
-              [
-                ...baseVideos.map((video) => video.duration),
-                ...newVideos.map((video) => video.duration),
-                duration,
-              ],
-              maxVideoTotalSec,
-            ) !== "within-limit"
+            result.status === "over-count" ||
+            result.status === "over-duration"
           ) {
             exceeded = true;
             break;
           }
-          newVideos.push(
-            asVideo({
-              id: randomId(),
-              url: item.fullImage,
-              file: new File([], "library-video"),
-              mediaToken: item.id,
-              duration,
-            }),
-          );
+          if (result.status === "added") nextVideos = result.next;
         }
         if (exceeded) {
+          const currentLimits = limitsRef.current;
           toast.error(
-            `Total video duration cannot exceed ${maxVideoTotalSec}s`,
+            `Total video duration cannot exceed ${currentLimits.maxVideoTotalSec}s`,
             { id: "video-ref-limit" },
           );
         }
-        if (newVideos.length > 0) {
-          setReferenceVideos?.([...baseVideos, ...newVideos]);
+        if (nextVideos !== referenceVideosRef.current) {
+          publishVideos(nextVideos);
         }
       } finally {
-        setIsProcessingGallery(false);
+        if (mountedRef.current) setIsProcessingGallery(false);
       }
       handleGalleryClose();
       return;
     }
     if (galleryTarget === "audio") {
-      const baseAudios = [...referenceAudios];
+      const operationEpoch = audioEpochRef.current;
+      const galleryEpoch = audioGalleryEpochRef.current;
+      const baseAudios = referenceAudiosRef.current;
       const availableSlots = Math.max(0, maxAudios - baseAudios.length);
       if (availableSlots <= 0) {
         toast.error(
@@ -598,11 +1331,18 @@ export function useDeckMedia<
 
       setIsProcessingGallery(true);
       try {
-        // Generation measures the current file rather than trusting gallery
-        // metadata, so the quote must probe that same URL every time too.
+        // Keep audio state aligned with the actual selected media too.
         const durations = await Promise.all(
-          itemsToProcess.map((item) => getAudioDurationFromSrc(item.fullImage)),
+          itemsToProcess.map((item) => probeDuration("audio", item.fullImage)),
         );
+        if (
+          operationEpoch !== audioEpochRef.current ||
+          galleryEpoch !== audioGalleryEpochRef.current
+        ) {
+          handleGalleryClose();
+          return;
+        }
+
         const unreadableCount = durations.filter(
           (duration) => duration == null,
         ).length;
@@ -613,58 +1353,75 @@ export function useDeckMedia<
           );
         }
 
-        const newAudios: TAudio[] = [];
+        let nextAudios = referenceAudiosRef.current;
         let exceeded = false;
         for (let i = 0; i < itemsToProcess.length; i++) {
+          if (
+            operationEpoch !== audioEpochRef.current ||
+            galleryEpoch !== audioGalleryEpochRef.current
+          ) {
+            handleGalleryClose();
+            return;
+          }
           const item = itemsToProcess[i]!;
           const duration = durations[i]!;
           if (duration == null) continue;
+          const candidate = asAudio({
+            id: randomId(),
+            url: item.fullImage,
+            mediaToken: item.id,
+            duration,
+          });
+          const currentLimits = limitsRef.current;
+          const result = appendMediaReference(nextAudios, candidate, {
+            maxCount: currentLimits.maxAudios,
+            maxTotalSeconds: currentLimits.maxAudioTotalSec,
+          });
+          if (result.status === "invalid-duration") {
+            toast.error("Could not verify audio duration", {
+              id: "audio-ref-duration",
+            });
+            break;
+          }
           if (
-            mediaDurationLimitStatus(
-              [
-                ...baseAudios.map((audio) => audio.duration),
-                ...newAudios.map((audio) => audio.duration),
-                duration,
-              ],
-              maxAudioTotalSec,
-            ) !== "within-limit"
+            result.status === "over-count" ||
+            result.status === "over-duration"
           ) {
             exceeded = true;
             break;
           }
-          newAudios.push(
-            asAudio({
-              id: randomId(),
-              url: item.fullImage,
-              file: new File([], "library-audio"),
-              mediaToken: item.id,
-              duration,
-            }),
-          );
+          if (result.status === "added") nextAudios = result.next;
         }
         if (exceeded) {
+          const currentLimits = limitsRef.current;
           toast.error(
-            `Total audio duration cannot exceed ${maxAudioTotalSec}s`,
+            `Total audio duration cannot exceed ${currentLimits.maxAudioTotalSec}s`,
             { id: "audio-ref-limit" },
           );
         }
-        if (newAudios.length > 0) {
-          setReferenceAudios?.([...baseAudios, ...newAudios]);
+        if (nextAudios !== referenceAudiosRef.current) {
+          publishAudios(nextAudios);
         }
       } finally {
-        setIsProcessingGallery(false);
+        if (mountedRef.current) setIsProcessingGallery(false);
       }
       handleGalleryClose();
       return;
     }
     if (galleryTarget === "end") {
+      if (
+        !endFrameEnabledRef.current ||
+        endGalleryEpochRef.current !== endFrameEpochRef.current
+      ) {
+        handleGalleryClose();
+        return;
+      }
       const item = selectedItems[0];
       if (item && item.fullImage) {
-        setEndFrameImage?.(
+        settersRef.current.setEndFrameImage?.(
           asImage({
             id: randomId(),
             url: item.fullImage,
-            file: new File([], "library-image"),
             mediaToken: item.id,
           }),
         );
@@ -672,25 +1429,25 @@ export function useDeckMedia<
       handleGalleryClose();
       return;
     }
-    const availableSlots = Math.max(0, maxImages - referenceImages.length);
+    const currentImages = referenceImagesRef.current;
+    const availableSlots = Math.max(0, maxImages - currentImages.length);
     if (availableSlots <= 0) {
       handleGalleryClose();
       return;
     }
 
-    const newRefs = [...referenceImages];
+    const newRefs = [...currentImages];
     selectedItems.slice(0, availableSlots).forEach((item) => {
       if (!item.fullImage) return;
       newRefs.push(
         asImage({
           id: randomId(),
           url: item.fullImage,
-          file: new File([], "library-image"),
           mediaToken: item.id,
         }),
       );
     });
-    setReferenceImages(newRefs);
+    publishImages(newRefs);
     handleGalleryClose();
   };
 
@@ -811,6 +1568,12 @@ export function useDeckMedia<
     uploadingVideo,
     uploadingAudio,
     availableImageSlots,
+    replaceImages,
+    replaceVideos,
+    replaceAudios,
+    removeReference,
+    reorderImages,
+    clearReferences,
     processImageFiles,
     processVideoFiles,
     processAudioFiles,

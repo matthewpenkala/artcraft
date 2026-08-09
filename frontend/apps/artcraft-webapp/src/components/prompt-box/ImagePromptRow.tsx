@@ -1,6 +1,5 @@
 import {
   useEffect,
-  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -11,7 +10,11 @@ import { Button } from "@storyteller/ui-button";
 import { Tooltip } from "@storyteller/ui-tooltip";
 import { Modal } from "@storyteller/ui-modal";
 import { twMerge } from "tailwind-merge";
-import { UploaderStates } from "@storyteller/common";
+import {
+  UploaderStates,
+  createOwnedMediaObjectUrl,
+  discardOwnedMediaObjectUrl,
+} from "@storyteller/common";
 import {
   DndContext,
   closestCenter,
@@ -33,6 +36,14 @@ import type { RefImage } from "./types";
 import { uploadImage } from "./upload-image";
 import { useIsMobile } from "../ui/use-mobile";
 import { SettingsDrawer } from "./mobile/SettingsDrawer";
+
+type PendingCancellation = () => void;
+
+const cancelPending = (pending: Set<PendingCancellation>) => {
+  const cancellations = [...pending];
+  pending.clear();
+  cancellations.forEach((cancel) => cancel());
+};
 
 interface ImagePromptRowProps {
   maxImagePromptCount: number;
@@ -77,12 +88,131 @@ export const ImagePromptRow = ({
   };
   const [uploadingEndFrame, setUploadingEndFrame] = useState(false);
   const [uploadingImages, setUploadingImages] = useState<
-    { id: string; file: File }[]
+    { id: string; previewUrl: string }[]
   >([]);
   const [previewImage, setPreviewImage] = useState<RefImage | null>(null);
 
+  const mountedRef = useRef(true);
+  const imageEpochRef = useRef(0);
+  const endEpochRef = useRef(0);
+  const pendingImageOperationsRef = useRef(new Set<PendingCancellation>());
+  const pendingEndOperationsRef = useRef(new Set<PendingCancellation>());
+  const livePolicyRef = useRef({
+    maxImagePromptCount,
+    isVideo,
+    isReferenceMode,
+    showEndFrameSection,
+    setEndFrameImage,
+  });
+  livePolicyRef.current = {
+    maxImagePromptCount,
+    isVideo,
+    isReferenceMode,
+    showEndFrameSection,
+    setEndFrameImage,
+  };
+
+  const imagePolicySignature = [
+    maxImagePromptCount,
+    isVideo,
+    isReferenceMode,
+  ].join("|");
+  const endPolicySignature = [
+    isVideo,
+    isReferenceMode,
+    showEndFrameSection,
+    Boolean(setEndFrameImage),
+  ].join("|");
+  const renderedPolicySignaturesRef = useRef({
+    image: imagePolicySignature,
+    end: endPolicySignature,
+  });
+  if (renderedPolicySignaturesRef.current.image !== imagePolicySignature) {
+    imageEpochRef.current += 1;
+  }
+  if (renderedPolicySignaturesRef.current.end !== endPolicySignature) {
+    endEpochRef.current += 1;
+  }
+  renderedPolicySignaturesRef.current = {
+    image: imagePolicySignature,
+    end: endPolicySignature,
+  };
+
   const referenceImagesRef = useRef(referenceImages);
+  const lastPublishedImagesRef = useRef<RefImage[] | null>(null);
+  const previousImagesPropRef = useRef(referenceImages);
+  const imagesExternallyCleared =
+    previousImagesPropRef.current !== referenceImages &&
+    lastPublishedImagesRef.current !== referenceImages &&
+    referenceImages.length === 0;
+  if (imagesExternallyCleared) imageEpochRef.current += 1;
+  if (previousImagesPropRef.current !== referenceImages) {
+    previousImagesPropRef.current = referenceImages;
+    lastPublishedImagesRef.current = null;
+  }
   referenceImagesRef.current = referenceImages;
+
+  const publishImages = (next: RefImage[]) => {
+    referenceImagesRef.current = next;
+    lastPublishedImagesRef.current = next;
+    setReferenceImages(next);
+  };
+
+  const imageUploadSupported = () =>
+    mountedRef.current && livePolicyRef.current.maxImagePromptCount > 0;
+  const endUploadSupported = () => {
+    const policy = livePolicyRef.current;
+    return (
+      mountedRef.current &&
+      policy.isVideo === true &&
+      policy.isReferenceMode !== true &&
+      policy.showEndFrameSection === true &&
+      Boolean(policy.setEndFrameImage)
+    );
+  };
+
+  const cancelImageOperations = (advanceEpoch = true) => {
+    if (advanceEpoch) imageEpochRef.current += 1;
+    cancelPending(pendingImageOperationsRef.current);
+    if (mountedRef.current) setUploadingImages([]);
+  };
+  const cancelEndOperations = (advanceEpoch = true) => {
+    if (advanceEpoch) endEpochRef.current += 1;
+    cancelPending(pendingEndOperationsRef.current);
+    if (mountedRef.current) setUploadingEndFrame(false);
+  };
+
+  const appliedPolicySignaturesRef = useRef(
+    renderedPolicySignaturesRef.current,
+  );
+  useEffect(() => {
+    const previous = appliedPolicySignaturesRef.current;
+    if (previous.image !== imagePolicySignature) {
+      cancelImageOperations(false);
+    }
+    if (previous.end !== endPolicySignature) {
+      cancelEndOperations(false);
+    }
+    appliedPolicySignaturesRef.current = {
+      image: imagePolicySignature,
+      end: endPolicySignature,
+    };
+  }, [imagePolicySignature, endPolicySignature]);
+
+  useEffect(() => {
+    if (imagesExternallyCleared) cancelImageOperations(false);
+  }, [referenceImages]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      imageEpochRef.current += 1;
+      endEpochRef.current += 1;
+      cancelPending(pendingImageOperationsRef.current);
+      cancelPending(pendingEndOperationsRef.current);
+    };
+  }, []);
 
   const allowReorder = maxImagePromptCount > 1 && referenceImages.length > 1;
 
@@ -99,16 +229,23 @@ export const ImagePromptRow = ({
   );
 
   const handleRemoveReference = (id: string) => {
-    setReferenceImages(referenceImages.filter((img) => img.id !== id));
+    publishImages(
+      referenceImagesRef.current.filter((image) => image.id !== id),
+    );
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || []);
-    if (files.length === 0) return;
+    if (files.length === 0 || !imageUploadSupported()) return;
 
-    const currentCount = referenceImages.length + uploadingImages.length;
-    const availableSlots = Math.max(0, maxImagePromptCount - currentCount);
+    const currentCount =
+      referenceImagesRef.current.length +
+      pendingImageOperationsRef.current.size;
+    const availableSlots = Math.max(
+      0,
+      livePolicyRef.current.maxImagePromptCount - currentCount,
+    );
     if (availableSlots <= 0) {
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
@@ -117,39 +254,80 @@ export const ImagePromptRow = ({
     const filesToProcess = files.slice(0, availableSlots);
 
     filesToProcess.forEach((file) => {
+      const operationEpoch = imageEpochRef.current;
       const uploadId = Math.random().toString(36).substring(7);
-      setUploadingImages((prev) => [...prev, { id: uploadId, file }]);
+      const previewUrl = createOwnedMediaObjectUrl(file);
+      setUploadingImages((prev) => [...prev, { id: uploadId, previewUrl }]);
 
+      let settled = false;
       const reader = new FileReader();
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        pendingImageOperationsRef.current.delete(cancel);
+        discardOwnedMediaObjectUrl(previewUrl);
+        if (mountedRef.current) {
+          setUploadingImages((prev) =>
+            prev.filter((image) => image.id !== uploadId),
+          );
+        }
+      };
+      const cancel = () => {
+        reader.onloadend = null;
+        reader.onerror = null;
+        if (reader.readyState === FileReader.LOADING) reader.abort();
+        finish();
+      };
+      const reject = cancel;
+      pendingImageOperationsRef.current.add(cancel);
+
       reader.onloadend = async () => {
-        await uploadImage({
-          title: `reference-image-${Math.random().toString(36).substring(2, 15)}`,
-          assetFile: file,
-          progressCallback: (newState) => {
-            if (newState.status === UploaderStates.success && newState.data) {
-              const refImage: RefImage = {
-                id: Math.random().toString(36).substring(7),
-                url: reader.result as string,
-                file,
-                mediaToken: newState.data,
-              };
-              setUploadingImages((prev) =>
-                prev.filter((img) => img.id !== uploadId),
-              );
-              setReferenceImages([...referenceImagesRef.current, refImage]);
-            } else if (
-              newState.status === UploaderStates.assetError ||
-              newState.status === UploaderStates.imageCreateError
-            ) {
-              setUploadingImages((prev) =>
-                prev.filter((img) => img.id !== uploadId),
-              );
-            }
-          },
-        });
+        if (typeof reader.result !== "string") {
+          reject();
+          return;
+        }
+        try {
+          await uploadImage({
+            title: `reference-image-${Math.random().toString(36).substring(2, 15)}`,
+            assetFile: file,
+            progressCallback: (newState) => {
+              if (newState.status === UploaderStates.success && newState.data) {
+                if (settled) return;
+                if (
+                  operationEpoch !== imageEpochRef.current ||
+                  !imageUploadSupported()
+                ) {
+                  cancel();
+                  return;
+                }
+                const refImage: RefImage = {
+                  id: Math.random().toString(36).substring(7),
+                  url: reader.result as string,
+                  file,
+                  mediaToken: newState.data,
+                };
+                finish();
+                const current = referenceImagesRef.current;
+                if (
+                  current.length < livePolicyRef.current.maxImagePromptCount
+                ) {
+                  publishImages([...current, refImage]);
+                }
+              } else if (
+                newState.status === UploaderStates.assetError ||
+                newState.status === UploaderStates.imageCreateError
+              ) {
+                reject();
+              }
+            },
+          });
+        } finally {
+          reject();
+        }
 
         if (fileInputRef.current) fileInputRef.current.value = "";
       };
+      reader.onerror = () => reject();
       reader.readAsDataURL(file);
     });
   };
@@ -157,41 +335,74 @@ export const ImagePromptRow = ({
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
-    const oldIndex = referenceImages.findIndex((img) => img.id === active.id);
-    const newIndex = referenceImages.findIndex((img) => img.id === over.id);
+    const current = referenceImagesRef.current;
+    const oldIndex = current.findIndex((img) => img.id === active.id);
+    const newIndex = current.findIndex((img) => img.id === over.id);
     if (oldIndex === -1 || newIndex === -1) return;
-    setReferenceImages(arrayMove(referenceImages, oldIndex, newIndex));
+    publishImages(arrayMove(current, oldIndex, newIndex));
   };
 
   const handleEndFrameUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file || !setEndFrameImage) return;
+    if (!file || !endUploadSupported()) return;
 
+    const operationEpoch = endEpochRef.current;
     setUploadingEndFrame(true);
     const reader = new FileReader();
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      pendingEndOperationsRef.current.delete(cancel);
+      if (mountedRef.current) setUploadingEndFrame(false);
+    };
+    const cancel = () => {
+      reader.onloadend = null;
+      reader.onerror = null;
+      if (reader.readyState === FileReader.LOADING) reader.abort();
+      finish();
+    };
+    pendingEndOperationsRef.current.add(cancel);
     reader.onloadend = async () => {
-      await uploadImage({
-        title: `end-frame-${Math.random().toString(36).substring(2, 15)}`,
-        assetFile: file,
-        progressCallback: (newState) => {
-          if (newState.status === UploaderStates.success && newState.data) {
-            setEndFrameImage({
-              id: Math.random().toString(36).substring(7),
-              url: reader.result as string,
-              file,
-              mediaToken: newState.data,
-            });
-            setUploadingEndFrame(false);
-          } else if (
-            newState.status === UploaderStates.assetError ||
-            newState.status === UploaderStates.imageCreateError
-          ) {
-            setUploadingEndFrame(false);
-          }
-        },
-      });
+      if (typeof reader.result !== "string") {
+        finish();
+        return;
+      }
+      try {
+        await uploadImage({
+          title: `end-frame-${Math.random().toString(36).substring(2, 15)}`,
+          assetFile: file,
+          progressCallback: (newState) => {
+            if (newState.status === UploaderStates.success && newState.data) {
+              if (settled) return;
+              if (
+                operationEpoch !== endEpochRef.current ||
+                !endUploadSupported()
+              ) {
+                cancel();
+                return;
+              }
+              livePolicyRef.current.setEndFrameImage?.({
+                id: Math.random().toString(36).substring(7),
+                url: reader.result as string,
+                file,
+                mediaToken: newState.data,
+              });
+              finish();
+            } else if (
+              newState.status === UploaderStates.assetError ||
+              newState.status === UploaderStates.imageCreateError
+            ) {
+              finish();
+            }
+          },
+        });
+      } finally {
+        finish();
+      }
       if (endFrameInputRef.current) endFrameInputRef.current.value = "";
     };
+    reader.onerror = () => cancel();
     reader.readAsDataURL(file);
   };
 
@@ -250,7 +461,11 @@ export const ImagePromptRow = ({
                 {sectionLabel}
                 {showCount && (
                   <span className="font-semibold text-white/60">
-                    ({usedSlots}/{maxImagePromptCount})
+                    (
+                    {maxImagePromptCount === Number.MAX_SAFE_INTEGER
+                      ? usedSlots
+                      : `${usedSlots}/${maxImagePromptCount}`}
+                    )
                   </span>
                 )}
               </span>
@@ -302,8 +517,8 @@ export const ImagePromptRow = ({
                 0,
                 Math.max(0, maxImagePromptCount - referenceImages.length),
               )
-              .map(({ id, file }) => (
-                <UploadingThumbnail key={id} file={file} />
+              .map(({ id, previewUrl }) => (
+                <UploadingThumbnail key={id} previewUrl={previewUrl} />
               ))}
 
             {canAddMore && (
@@ -528,6 +743,7 @@ const ImageThumbnail = ({
       className="h-full w-full object-cover"
     />
     <button
+      aria-label="Remove reference image"
       onClick={(e) => {
         e.stopPropagation();
         onRemove(image.id);
@@ -585,6 +801,7 @@ const SortableImage = ({
         className="h-full w-full object-cover"
       />
       <button
+        aria-label="Remove reference image"
         onClick={(e) => {
           e.stopPropagation();
           onRemove(image.id);
@@ -599,9 +816,7 @@ const SortableImage = ({
   );
 };
 
-const UploadingThumbnail = ({ file }: { file: File }) => {
-  const previewUrl = useMemo(() => URL.createObjectURL(file), [file]);
-  useEffect(() => () => URL.revokeObjectURL(previewUrl), [previewUrl]);
+const UploadingThumbnail = ({ previewUrl }: { previewUrl: string }) => {
   return (
     <div className="glass relative aspect-square w-10 sm:w-14 overflow-hidden rounded-lg border-2 border-white/30">
       <div className="absolute inset-0">

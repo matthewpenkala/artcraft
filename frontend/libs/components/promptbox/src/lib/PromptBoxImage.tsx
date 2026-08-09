@@ -17,7 +17,10 @@ import {
   useEnterToGenerateStore,
 } from "./promptStore";
 import { useAutoGrowEditorHeight } from "./useAutoGrowEditorHeight";
-import { PromptFullscreenModal, useFullscreenPrompt } from "./PromptFullscreenModal";
+import {
+  PromptFullscreenModal,
+  useFullscreenPrompt,
+} from "./PromptFullscreenModal";
 import { PromptFullscreenButton } from "./PromptFullscreenButton";
 import { PromptClearAllButton } from "./PromptClearAllButton";
 import { gtagEvent } from "@storyteller/google-analytics";
@@ -129,6 +132,7 @@ export const PromptBoxImage = ({
     referenceImages,
     setReferenceImages,
     maxImages: maxImagePromptCount,
+    operationKey: selectedModel?.model,
     uploadImage: uploadImage as UploadMediaFn | undefined,
     ownGalleryModal: true,
   });

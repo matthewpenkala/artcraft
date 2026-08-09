@@ -11,6 +11,7 @@ import { twMerge } from "tailwind-merge";
 import { ChevronDownIcon, ChevronUpIcon, MusicIcon, UsersIcon, VideoIcon } from "lucide-react";
 import { DynamicIcon } from "@storyteller/icons";
 import { GenerateIconButton } from "@storyteller/ui-button";
+import { formatMediaDurationSeconds } from "@storyteller/common";
 import { Tooltip } from "@storyteller/ui-tooltip";
 import {
   KeyframeCards,
@@ -23,7 +24,6 @@ import {
   type DeckAddAction,
   type DeckItem,
 } from "@storyteller/ui-promptbox";
-import { arrayMove } from "@dnd-kit/sortable";
 import {
   PromptBoxDropOverlay,
   usePromptBoxDrop,
@@ -34,7 +34,6 @@ import { uploadImage } from "./upload-image";
 import { uploadVideo, uploadAudio } from "./upload-media";
 import type { RefImage, RefVideo, RefAudio, MentionItem } from "./types";
 import { useEnterToGenerateStore } from "../../lib/enter-to-generate-store";
-import { formatMediaDurationSeconds } from "@storyteller/common";
 import {
   PromptFullscreenButton,
   PromptFullscreenModal,
@@ -63,6 +62,7 @@ interface PromptBoxProps {
   isReferenceMode?: boolean;
   endFrameImage?: RefImage;
   onEndFrameImageChange?: (image?: RefImage) => void;
+  onReferenceFramesChange?: (images: RefImage[], endImage?: RefImage) => void;
   showEndFrameSection?: boolean;
 
   // Toolbar slots
@@ -95,6 +95,7 @@ interface PromptBoxProps {
   onReferenceAudiosChange?: (audios: RefAudio[]) => void;
   maxAudioCount?: number;
   maxAudioRefDuration?: number;
+  referenceOperationKey?: unknown;
 
   // Always-visible named slot cards rendered beside the reference deck
   // (object page's multi-view angles + input mesh), built from DeckSlotCard.
@@ -142,6 +143,7 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
       isReferenceMode,
       endFrameImage,
       onEndFrameImageChange,
+      onReferenceFramesChange,
       showEndFrameSection,
       leftToolbar,
       rightToolbar,
@@ -162,6 +164,7 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
       onReferenceAudiosChange,
       maxAudioCount = 2,
       maxAudioRefDuration = 30,
+      referenceOperationKey,
       referenceSlots,
       modelSelector,
       secondaryPromptRow,
@@ -204,6 +207,7 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
     const mentionAnchorRef = useRef<number | null>(null);
 
     const hasMentionItems = (mentionItems?.length ?? 0) > 0;
+    const isKeyframeMode = !!isVideo && !isReferenceMode;
 
     const deck = useDeckMedia({
       referenceImages,
@@ -212,14 +216,22 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
       // model only takes audio/video/mesh refs.
       maxImages: supportsImagePrompts ? maxImagePromptCount : 0,
       setEndFrameImage: onEndFrameImageChange,
+      endFrameEnabled: isKeyframeMode && !!showEndFrameSection,
       referenceVideos,
-      setReferenceVideos: onReferenceVideosChange,
+      setReferenceVideos:
+        !isKeyframeMode && videoRefsSupported
+          ? onReferenceVideosChange
+          : undefined,
       maxVideos: maxVideoCount,
       maxVideoTotalSec: maxVideoRefDuration,
       referenceAudios,
-      setReferenceAudios: onReferenceAudiosChange,
+      setReferenceAudios:
+        !isKeyframeMode && audioRefsSupported
+          ? onReferenceAudiosChange
+          : undefined,
       maxAudios: maxAudioCount,
       maxAudioTotalSec: maxAudioRefDuration,
+      operationKey: referenceOperationKey,
       uploadImage,
       uploadVideo,
       uploadAudio,
@@ -231,9 +243,7 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
     // their MIME matches, gated on what the page's model supports. Keyframe
     // mode renders no video/audio deck, so those kinds only land in
     // reference mode where the user can see (and remove) them.
-    const isKeyframeMode = !!isVideo && !isReferenceMode;
-    const dropAcceptsImages =
-      !!supportsImagePrompts && maxImagePromptCount > 0;
+    const dropAcceptsImages = !!supportsImagePrompts && maxImagePromptCount > 0;
     const dropAcceptsVideos =
       !isKeyframeMode && !!videoRefsSupported && !!onReferenceVideosChange;
     const dropAcceptsAudio =
@@ -345,8 +355,7 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
     const deckAddActions: DeckAddAction[] = [];
     if (
       supportsImagePrompts &&
-      referenceImages.length + deck.uploadingImages.length <
-        maxImagePromptCount
+      referenceImages.length + deck.uploadingImages.length < maxImagePromptCount
     ) {
       deckAddActions.push({
         key: "upload-image",
@@ -365,6 +374,7 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
     }
     if (
       videoRefsSupported &&
+      !!onReferenceVideosChange &&
       referenceVideos.length < maxVideoCount &&
       !deck.uploadingVideo
     ) {
@@ -385,6 +395,7 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
     }
     if (
       audioRefsSupported &&
+      !!onReferenceAudiosChange &&
       referenceAudios.length < maxAudioCount &&
       !deck.uploadingAudio
     ) {
@@ -404,19 +415,7 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
       }
     }
 
-    const handleRemoveDeckItem = (id: string) => {
-      if (referenceImages.some((img) => img.id === id)) {
-        onReferenceImagesChange(referenceImages.filter((img) => img.id !== id));
-      } else if (referenceVideos.some((video) => video.id === id)) {
-        onReferenceVideosChange?.(
-          referenceVideos.filter((video) => video.id !== id),
-        );
-      } else if (referenceAudios.some((audio) => audio.id === id)) {
-        onReferenceAudiosChange?.(
-          referenceAudios.filter((audio) => audio.id !== id),
-        );
-      }
-    };
+    const handleRemoveDeckItem = deck.removeReference;
 
     const firstFrameItem: DeckItem | undefined = referenceImages[0]
       ? {
@@ -462,26 +461,31 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
       !!hasClearableExtras;
     const hasClearableContent = prompt.length > 0 || hasAttachedRefs;
 
-    const handleClearAll = () => {
-      onPromptChange("");
+    const clearAllReferences = () => {
       // Prefer the page's single-shot clear (pages that keep all refs in one
       // state object need it to avoid stale-closure partial updates).
-      if (onClearAllRefs) {
-        onClearAllRefs();
-      } else {
-        onReferenceImagesChange([]);
-        onEndFrameImageChange?.(undefined);
-        onReferenceVideosChange?.([]);
-        onReferenceAudiosChange?.([]);
-      }
+      deck.clearReferences(() => {
+        if (onClearAllRefs) {
+          onClearAllRefs();
+        } else {
+          onReferenceImagesChange([]);
+          onEndFrameImageChange?.(undefined);
+          onReferenceVideosChange?.([]);
+          onReferenceAudiosChange?.([]);
+        }
+      });
+    };
+
+    const handleClearAll = () => {
+      onPromptChange("");
+      clearAllReferences();
       onClearAllExtras?.();
     };
 
     const handleSwapFrames = () => {
       const first = referenceImages[0];
-      if (!first || !endFrameImage) return;
-      onReferenceImagesChange([endFrameImage]);
-      onEndFrameImageChange?.(first);
+      if (!first || !endFrameImage || !onReferenceFramesChange) return;
+      onReferenceFramesChange([endFrameImage], first);
     };
 
     // Left-of-textarea reference widget: image deck, keyframe cards, or the
@@ -526,40 +530,51 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
                   ]
                 : []),
             ]}
-            onRemoveFirst={() => onReferenceImagesChange([])}
+            onRemoveFirst={() => deck.replaceImages([])}
             onRemoveLast={() => onEndFrameImageChange?.(undefined)}
-            onSwap={handleSwapFrames}
+            onSwap={onReferenceFramesChange ? handleSwapFrames : undefined}
           />
         );
       }
       if (!supportsImagePrompts && !videoRefsSupported && !audioRefsSupported) {
         return null;
       }
-      const totalVideoRefSeconds = referenceVideos.reduce(
-        (sum, video) => sum + video.duration,
-        0,
-      );
-      const totalAudioRefSeconds = referenceAudios.reduce(
-        (sum, audio) => sum + audio.duration,
-        0,
-      );
+      const totalVideoRefDisplay =
+        referenceVideos.length === 0
+          ? "0"
+          : formatMediaDurationSeconds(
+              referenceVideos.reduce((sum, video) => sum + video.duration, 0),
+            );
+      const totalAudioRefDisplay =
+        referenceAudios.length === 0
+          ? "0"
+          : formatMediaDurationSeconds(
+              referenceAudios.reduce((sum, audio) => sum + audio.duration, 0),
+            );
       const groupHints: Record<string, string> = {};
       if (supportsImagePrompts) {
-        groupHints.image = `${referenceImages.length}/${maxImagePromptCount}`;
+        groupHints.image =
+          maxImagePromptCount === Number.MAX_SAFE_INTEGER
+            ? `${referenceImages.length}`
+            : `${referenceImages.length}/${maxImagePromptCount}`;
       }
       // A non-finite duration cap means "no limit" — show counts only.
       if (videoRefsSupported) {
         groupHints.video =
-          `${referenceVideos.length}/${maxVideoCount}` +
+          (maxVideoCount === Number.MAX_SAFE_INTEGER
+            ? `${referenceVideos.length}`
+            : `${referenceVideos.length}/${maxVideoCount}`) +
           (isFinite(maxVideoRefDuration)
-            ? ` · ${formatMediaDurationSeconds(totalVideoRefSeconds)}/${maxVideoRefDuration}s`
+            ? ` · ${totalVideoRefDisplay}/${maxVideoRefDuration}s`
             : "");
       }
       if (audioRefsSupported) {
         groupHints.audio =
-          `${referenceAudios.length}/${maxAudioCount}` +
+          (maxAudioCount === Number.MAX_SAFE_INTEGER
+            ? `${referenceAudios.length}`
+            : `${referenceAudios.length}/${maxAudioCount}`) +
           (isFinite(maxAudioRefDuration)
-            ? ` · ${formatMediaDurationSeconds(totalAudioRefSeconds)}/${maxAudioRefDuration}s`
+            ? ` · ${totalAudioRefDisplay}/${maxAudioRefDuration}s`
             : "");
       }
 
@@ -575,10 +590,8 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
               : undefined
           }
           onRemove={handleRemoveDeckItem}
-          onReorderImages={(from, to) =>
-            onReferenceImagesChange(arrayMove(referenceImages, from, to))
-          }
-          onClearAll={onClearAllRefs}
+          onReorderImages={deck.reorderImages}
+          onClearAll={clearAllReferences}
           alwaysExpanded={alwaysExpanded}
         />
       );

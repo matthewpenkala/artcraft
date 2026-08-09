@@ -2,18 +2,33 @@ import { create } from "zustand";
 import { CommonAspectRatio } from "@storyteller/model-list";
 import { CommonResolution } from "@storyteller/model-list";
 import { CommonQuality } from "@storyteller/model-list";
+import {
+  reconcileOwnedMediaObjectUrlOwners,
+  reconcileOwnedMediaObjectUrls,
+} from "@storyteller/common";
+
+const PROMPT_2D_IMAGES_OWNER = Symbol("prompt-2d-images");
+const PROMPT_3D_IMAGES_OWNER = Symbol("prompt-3d-images");
+const PROMPT_IMAGE_IMAGES_OWNER = Symbol("prompt-image-images");
+const PROMPT_VIDEO_IMAGES_OWNER = Symbol("prompt-video-images");
+const PROMPT_VIDEO_END_IMAGE_OWNER = Symbol("prompt-video-end-image");
+const PROMPT_VIDEO_VIDEOS_OWNER = Symbol("prompt-video-videos");
+const PROMPT_VIDEO_AUDIOS_OWNER = Symbol("prompt-video-audios");
+const PROMPT_AUDIO_AUDIOS_OWNER = Symbol("prompt-audio-audios");
+const PROMPT_AUDIO_IMAGES_OWNER = Symbol("prompt-audio-images");
+const PROMPT_EDIT_IMAGES_OWNER = Symbol("prompt-edit-images");
 
 export interface RefImage {
   id: string;
   url: string;
-  file: File;
+  file?: File;
   mediaToken: string;
 }
 
 export interface RefVideo {
   id: string;
   url: string;
-  file: File;
+  file?: File;
   mediaToken: string;
   duration: number; // seconds
 }
@@ -21,7 +36,7 @@ export interface RefVideo {
 export interface RefAudio {
   id: string;
   url: string;
-  file: File;
+  file?: File;
   mediaToken: string;
   duration: number; // seconds
 }
@@ -56,7 +71,15 @@ export const usePrompt2DStore = create<Prompt2DStore>()((set) => ({
   setAspectRatio: (aspectRatio) => set({ aspectRatio }),
   setResolution: (resolution) => set({ resolution }),
   setUseSystemPrompt: (useSystemPrompt) => set({ useSystemPrompt }),
-  setReferenceImages: (referenceImages) => set({ referenceImages }),
+  setReferenceImages: (referenceImages) =>
+    set((state) => {
+      reconcileReferenceUrls(
+        PROMPT_2D_IMAGES_OWNER,
+        state.referenceImages,
+        referenceImages,
+      );
+      return { referenceImages };
+    }),
   setGenerationCount: (generationCount) => set({ generationCount }),
 }));
 
@@ -88,7 +111,15 @@ export const usePrompt3DStore = create<Prompt3DStore>()((set) => ({
   setPrompt: (prompt) => set({ prompt }),
   setResolution: (resolution) => set({ resolution }),
   setUseSystemPrompt: (useSystemPrompt) => set({ useSystemPrompt }),
-  setReferenceImages: (referenceImages) => set({ referenceImages }),
+  setReferenceImages: (referenceImages) =>
+    set((state) => {
+      reconcileReferenceUrls(
+        PROMPT_3D_IMAGES_OWNER,
+        state.referenceImages,
+        referenceImages,
+      );
+      return { referenceImages };
+    }),
   pushPromptHistory: (prompt) =>
     set((state) => {
       const trimmed = prompt.trim();
@@ -139,7 +170,15 @@ export const usePromptImageStore = create<PromptImageStore>()((set) => ({
   setAspectRatio: (aspectRatio) => set({ aspectRatio }),
   setResolution: (resolution) => set({ resolution }),
   setUseSystemPrompt: (useSystemPrompt) => set({ useSystemPrompt }),
-  setReferenceImages: (referenceImages) => set({ referenceImages }),
+  setReferenceImages: (referenceImages) =>
+    set((state) => {
+      reconcileReferenceUrls(
+        PROMPT_IMAGE_IMAGES_OWNER,
+        state.referenceImages,
+        referenceImages,
+      );
+      return { referenceImages };
+    }),
   setGenerationCount: (generationCount) => set({ generationCount }),
   setCommonAspectRatio: (commonAspectRatio) => set({ commonAspectRatio }),
   setCommonResolution: (commonResolution) => set({ commonResolution }),
@@ -168,6 +207,7 @@ interface PromptVideoStore {
   setUseSystemPrompt: (value: boolean) => void;
   setReferenceImages: (images: RefImage[]) => void;
   setEndFrameImage: (image?: RefImage) => void;
+  setReferenceFrames: (images: RefImage[], endImage?: RefImage) => void;
   setReferenceVideos: (videos: RefVideo[]) => void;
   setReferenceAudios: (audios: RefAudio[]) => void;
   setGenerateWithSound: (value: boolean) => void;
@@ -193,10 +233,58 @@ export const usePromptVideoStore = create<PromptVideoStore>()((set) => ({
   setResolution: (resolution) => set({ resolution }),
   setAspectRatio: (aspectRatio) => set({ aspectRatio }),
   setUseSystemPrompt: (useSystemPrompt) => set({ useSystemPrompt }),
-  setReferenceImages: (referenceImages) => set({ referenceImages }),
-  setEndFrameImage: (endFrameImage) => set({ endFrameImage }),
-  setReferenceVideos: (referenceVideos) => set({ referenceVideos }),
-  setReferenceAudios: (referenceAudios) => set({ referenceAudios }),
+  setReferenceImages: (referenceImages) =>
+    set((state) => {
+      reconcileReferenceUrls(
+        PROMPT_VIDEO_IMAGES_OWNER,
+        state.referenceImages,
+        referenceImages,
+      );
+      return { referenceImages };
+    }),
+  setEndFrameImage: (endFrameImage) =>
+    set((state) => {
+      reconcileReferenceUrls(
+        PROMPT_VIDEO_END_IMAGE_OWNER,
+        state.endFrameImage ? [state.endFrameImage] : [],
+        endFrameImage ? [endFrameImage] : [],
+      );
+      return { endFrameImage };
+    }),
+  setReferenceFrames: (referenceImages, endFrameImage) =>
+    set((state) => {
+      reconcileOwnedMediaObjectUrlOwners([
+        {
+          owner: PROMPT_VIDEO_IMAGES_OWNER,
+          previousUrls: state.referenceImages.map((reference) => reference.url),
+          nextUrls: referenceImages.map((reference) => reference.url),
+        },
+        {
+          owner: PROMPT_VIDEO_END_IMAGE_OWNER,
+          previousUrls: state.endFrameImage ? [state.endFrameImage.url] : [],
+          nextUrls: endFrameImage ? [endFrameImage.url] : [],
+        },
+      ]);
+      return { referenceImages, endFrameImage };
+    }),
+  setReferenceVideos: (referenceVideos) =>
+    set((state) => {
+      reconcileReferenceUrls(
+        PROMPT_VIDEO_VIDEOS_OWNER,
+        state.referenceVideos,
+        referenceVideos,
+      );
+      return { referenceVideos };
+    }),
+  setReferenceAudios: (referenceAudios) =>
+    set((state) => {
+      reconcileReferenceUrls(
+        PROMPT_VIDEO_AUDIOS_OWNER,
+        state.referenceAudios,
+        referenceAudios,
+      );
+      return { referenceAudios };
+    }),
   setGenerateWithSound: (generateWithSound) => set({ generateWithSound }),
   setDuration: (duration) => set({ duration }),
   setInputMode: (inputMode) => set({ inputMode }),
@@ -268,9 +356,37 @@ export const usePromptAudioStore = create<PromptAudioStore>()((set) => ({
   setSpeed: (speed) => set({ speed }),
   setVolume: (volume) => set({ volume }),
   setPitch: (pitch) => set({ pitch }),
-  setReferenceAudios: (referenceAudios) => set({ referenceAudios }),
-  setReferenceImages: (referenceImages) => set({ referenceImages }),
+  setReferenceAudios: (referenceAudios) =>
+    set((state) => {
+      reconcileReferenceUrls(
+        PROMPT_AUDIO_AUDIOS_OWNER,
+        state.referenceAudios,
+        referenceAudios,
+      );
+      return { referenceAudios };
+    }),
+  setReferenceImages: (referenceImages) =>
+    set((state) => {
+      reconcileReferenceUrls(
+        PROMPT_AUDIO_IMAGES_OWNER,
+        state.referenceImages,
+        referenceImages,
+      );
+      return { referenceImages };
+    }),
 }));
+
+function reconcileReferenceUrls(
+  owner: symbol,
+  previous: readonly { url: string }[],
+  next: readonly { url: string }[],
+): void {
+  reconcileOwnedMediaObjectUrls(
+    owner,
+    previous.map((reference) => reference.url),
+    next.map((reference) => reference.url),
+  );
+}
 
 // ----- Edit Prompt Box Store -----
 type EditAspectRatio = "auto" | "wide" | "tall" | "square";
@@ -288,7 +404,15 @@ export const usePromptEditStore = create<PromptEditStore>()((set) => ({
   referenceImages: [],
   aspectRatio: "auto",
   resolution: "1k",
-  setReferenceImages: (referenceImages) => set({ referenceImages }),
+  setReferenceImages: (referenceImages) =>
+    set((state) => {
+      reconcileReferenceUrls(
+        PROMPT_EDIT_IMAGES_OWNER,
+        state.referenceImages,
+        referenceImages,
+      );
+      return { referenceImages };
+    }),
   setAspectRatio: (aspectRatio) => set({ aspectRatio }),
   setResolution: (resolution) => set({ resolution }),
 }));
@@ -303,7 +427,9 @@ const ENTER_TO_GENERATE_STORAGE_KEY = "artcraft_enter_to_generate";
 const readEnterToGenerate = (): boolean => {
   if (typeof window === "undefined") return false;
   try {
-    return window.localStorage.getItem(ENTER_TO_GENERATE_STORAGE_KEY) === "true";
+    return (
+      window.localStorage.getItem(ENTER_TO_GENERATE_STORAGE_KEY) === "true"
+    );
   } catch {
     return false;
   }
@@ -327,13 +453,15 @@ interface EnterToGenerateStore {
   setEnabled: (enabled: boolean) => void;
 }
 
-export const useEnterToGenerateStore = create<EnterToGenerateStore>()((set) => ({
-  enabled: readEnterToGenerate(),
-  setEnabled: (enabled) => {
-    writeEnterToGenerate(enabled);
-    set({ enabled });
-  },
-}));
+export const useEnterToGenerateStore = create<EnterToGenerateStore>()(
+  (set) => ({
+    enabled: readEnterToGenerate(),
+    setEnabled: (enabled) => {
+      writeEnterToGenerate(enabled);
+      set({ enabled });
+    },
+  }),
+);
 
 // ----- Characters Store -----
 export interface StoredCharacter {

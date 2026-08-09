@@ -33,10 +33,10 @@ describe("reference duration display consumers", () => {
       "formatMediaDurationSeconds(audio.duration)",
     );
     expect(imagePromptRow).toContain(
-      "formatMediaDurationSeconds(totalVideoDuration)",
+      "formatMediaDurationMillis(totalVideoDurationMillis",
     );
     expect(imagePromptRow).toContain(
-      "formatMediaDurationSeconds(totalAudioDuration)",
+      "formatMediaDurationMillis(totalAudioDurationMillis",
     );
     expect(audioReferenceRow).toContain(
       "formatMediaDurationSeconds(audio.duration)",

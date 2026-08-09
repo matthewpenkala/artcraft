@@ -3,3 +3,6 @@ export * from "./media-format";
 export * from "./referral";
 export * from "./media-duration";
 export * from "./video-cost-estimate";
+export * from "./media-object-url";
+export * from "./media-reference-state";
+export * from "./media-reference-batch";

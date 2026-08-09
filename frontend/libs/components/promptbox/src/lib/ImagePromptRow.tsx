@@ -17,7 +17,14 @@ import { toast } from "@storyteller/ui-toaster";
 import { twMerge } from "tailwind-merge";
 import {
   UploaderStates,
+  appendMediaReference,
+  createOwnedMediaObjectUrl,
+  discardOwnedMediaObjectUrl,
+  formatMediaDurationMillis,
   formatMediaDurationSeconds,
+  normalizeMediaDurationSeconds,
+  MEDIA_DURATION_PROBE_TIMEOUT_MS,
+  sumMediaDurationMillis,
 } from "@storyteller/common";
 import {
   AUDIO_FILE_ACCEPT,
@@ -45,6 +52,14 @@ import { CSS } from "@dnd-kit/utilities";
 import type { UploadMediaFn } from "@storyteller/api";
 export type { UploadMediaFn as UploadImageFn } from "@storyteller/api";
 type UploadImageFn = UploadMediaFn;
+
+type PendingCancellation = () => void;
+
+const cancelPending = (pending: Set<PendingCancellation>) => {
+  const cancellations = [...pending];
+  pending.clear();
+  cancellations.forEach((cancel) => cancel());
+};
 
 interface ImagePromptRowProps {
   visible: boolean;
@@ -185,7 +200,7 @@ export const ImagePromptRow = ({
   const videoFileInputRef = useRef<HTMLInputElement>(null);
   const audioFileInputRef = useRef<HTMLInputElement>(null);
   const [uploadingImages, setUploadingImages] = useState<
-    { id: string; file: File }[]
+    { id: string; file: File; previewUrl: string }[]
   >([]);
   const [isGalleryModalOpen, setIsGalleryModalOpen] = useState(false);
   const [galleryTarget, setGalleryTarget] = useState<"start" | "end" | "video">(
@@ -200,21 +215,347 @@ export const ImagePromptRow = ({
   const [uploadingEnd, setUploadingEnd] = useState<{
     id: string;
     file: File;
+    previewUrl: string;
   } | null>(null);
   const [uploadingVideo, setUploadingVideo] = useState<{
     id: string;
     file: File;
+    previewUrl: string;
   } | null>(null);
   const [uploadingAudio, setUploadingAudio] = useState<{
     id: string;
     file: File;
+    previewUrl: string;
   } | null>(null);
   const [isProcessingGallery, setIsProcessingGallery] = useState(false);
 
+  const mountedRef = useRef(true);
+  const imageEpochRef = useRef(0);
+  const endEpochRef = useRef(0);
+  const videoEpochRef = useRef(0);
+  const videoGalleryEpochRef = useRef(0);
+  const audioEpochRef = useRef(0);
+  const pendingImageOperationsRef = useRef(new Set<PendingCancellation>());
+  const pendingEndOperationsRef = useRef(new Set<PendingCancellation>());
+  const pendingVideoOperationsRef = useRef(new Set<PendingCancellation>());
+  const pendingVideoGalleryProbesRef = useRef(new Set<PendingCancellation>());
+  const pendingAudioOperationsRef = useRef(new Set<PendingCancellation>());
+
+  const livePolicyRef = useRef({
+    visible,
+    allowUpload,
+    allowUploadEnd,
+    isVideo,
+    isReferenceMode,
+    showEndFrameSection,
+    showVideoReferenceSection,
+    maxImagePromptCount,
+    maxVideoCount,
+    maxVideoRefDuration,
+    maxAudioCount,
+    maxAudioRefDuration,
+    setEndFrameImage,
+    setReferenceVideos,
+    setReferenceAudios,
+  });
+  livePolicyRef.current = {
+    visible,
+    allowUpload,
+    allowUploadEnd,
+    isVideo,
+    isReferenceMode,
+    showEndFrameSection,
+    showVideoReferenceSection,
+    maxImagePromptCount,
+    maxVideoCount,
+    maxVideoRefDuration,
+    maxAudioCount,
+    maxAudioRefDuration,
+    setEndFrameImage,
+    setReferenceVideos,
+    setReferenceAudios,
+  };
+
+  const imagePolicySignature = [
+    visible,
+    allowUpload,
+    isVideo,
+    isReferenceMode,
+    maxImagePromptCount,
+  ].join("|");
+  const endPolicySignature = [
+    visible,
+    allowUploadEnd,
+    isVideo,
+    isReferenceMode,
+    showEndFrameSection,
+    maxImagePromptCount,
+  ].join("|");
+  const videoPolicySignature = [
+    visible,
+    isVideo,
+    isReferenceMode,
+    showVideoReferenceSection,
+    maxVideoCount,
+    maxVideoRefDuration,
+    Boolean(setReferenceVideos),
+  ].join("|");
+  const audioPolicySignature = [
+    visible,
+    isVideo,
+    isReferenceMode,
+    showVideoReferenceSection,
+    maxAudioCount,
+    maxAudioRefDuration,
+    Boolean(setReferenceAudios),
+  ].join("|");
+
+  const renderedPolicySignaturesRef = useRef({
+    image: imagePolicySignature,
+    end: endPolicySignature,
+    video: videoPolicySignature,
+    audio: audioPolicySignature,
+  });
+  if (renderedPolicySignaturesRef.current.image !== imagePolicySignature) {
+    imageEpochRef.current += 1;
+  }
+  if (renderedPolicySignaturesRef.current.end !== endPolicySignature) {
+    endEpochRef.current += 1;
+  }
+  if (renderedPolicySignaturesRef.current.video !== videoPolicySignature) {
+    videoEpochRef.current += 1;
+  }
+  if (renderedPolicySignaturesRef.current.audio !== audioPolicySignature) {
+    audioEpochRef.current += 1;
+  }
+  renderedPolicySignaturesRef.current = {
+    image: imagePolicySignature,
+    end: endPolicySignature,
+    video: videoPolicySignature,
+    audio: audioPolicySignature,
+  };
+
   const referenceImagesRef = useRef(referenceImages);
+  const referenceVideosRef = useRef(referenceVideos);
+  const referenceAudiosRef = useRef(referenceAudios);
+  const lastPublishedImagesRef = useRef<RefImage[] | null>(null);
+  const lastPublishedVideosRef = useRef<RefVideo[] | null>(null);
+  const lastPublishedAudiosRef = useRef<RefAudio[] | null>(null);
+  const previousImagesPropRef = useRef(referenceImages);
+  const previousVideosPropRef = useRef(referenceVideos);
+  const previousAudiosPropRef = useRef(referenceAudios);
+
+  const imagesExternallyCleared =
+    previousImagesPropRef.current !== referenceImages &&
+    lastPublishedImagesRef.current !== referenceImages &&
+    referenceImages.length === 0;
+  const videosExternallyCleared =
+    Boolean(setReferenceVideos) &&
+    previousVideosPropRef.current !== referenceVideos &&
+    lastPublishedVideosRef.current !== referenceVideos &&
+    referenceVideos.length === 0;
+  const audiosExternallyCleared =
+    Boolean(setReferenceAudios) &&
+    previousAudiosPropRef.current !== referenceAudios &&
+    lastPublishedAudiosRef.current !== referenceAudios &&
+    referenceAudios.length === 0;
+  if (imagesExternallyCleared) imageEpochRef.current += 1;
+  if (videosExternallyCleared) videoEpochRef.current += 1;
+  if (audiosExternallyCleared) audioEpochRef.current += 1;
+
+  if (previousImagesPropRef.current !== referenceImages) {
+    previousImagesPropRef.current = referenceImages;
+    lastPublishedImagesRef.current = null;
+  }
+  if (previousVideosPropRef.current !== referenceVideos) {
+    previousVideosPropRef.current = referenceVideos;
+    lastPublishedVideosRef.current = null;
+  }
+  if (previousAudiosPropRef.current !== referenceAudios) {
+    previousAudiosPropRef.current = referenceAudios;
+    lastPublishedAudiosRef.current = null;
+  }
+  referenceImagesRef.current = referenceImages;
+  referenceVideosRef.current = referenceVideos;
+  referenceAudiosRef.current = referenceAudios;
+
+  const publishImages = (next: RefImage[]) => {
+    referenceImagesRef.current = next;
+    lastPublishedImagesRef.current = next;
+    setReferenceImages(next);
+  };
+  const publishVideos = (next: RefVideo[]) => {
+    const setter = livePolicyRef.current.setReferenceVideos;
+    if (!setter) return false;
+    referenceVideosRef.current = next;
+    lastPublishedVideosRef.current = next;
+    setter(next);
+    return true;
+  };
+  const publishAudios = (next: RefAudio[]) => {
+    const setter = livePolicyRef.current.setReferenceAudios;
+    if (!setter) return false;
+    referenceAudiosRef.current = next;
+    lastPublishedAudiosRef.current = next;
+    setter(next);
+    return true;
+  };
+
+  const videoOperationsRef = useRef<Promise<void>>(Promise.resolve());
+  const audioOperationsRef = useRef<Promise<void>>(Promise.resolve());
+
+  const imageUploadSupported = () => {
+    const policy = livePolicyRef.current;
+    return (
+      mountedRef.current &&
+      policy.visible &&
+      policy.allowUpload &&
+      policy.maxImagePromptCount > 0
+    );
+  };
+  const imageGallerySupported = () => {
+    const policy = livePolicyRef.current;
+    return (
+      mountedRef.current && policy.visible && policy.maxImagePromptCount > 0
+    );
+  };
+  const endUploadSupported = () => {
+    const policy = livePolicyRef.current;
+    return (
+      mountedRef.current &&
+      policy.visible &&
+      policy.allowUploadEnd &&
+      policy.isVideo === true &&
+      policy.isReferenceMode !== true &&
+      policy.showEndFrameSection === true &&
+      Boolean(policy.setEndFrameImage)
+    );
+  };
+  const endGallerySupported = () => {
+    const policy = livePolicyRef.current;
+    return (
+      mountedRef.current &&
+      policy.visible &&
+      policy.isVideo === true &&
+      policy.isReferenceMode !== true &&
+      policy.showEndFrameSection === true &&
+      Boolean(policy.setEndFrameImage)
+    );
+  };
+  const videoReferencesSupported = () => {
+    const policy = livePolicyRef.current;
+    return (
+      mountedRef.current &&
+      policy.visible &&
+      policy.isVideo === true &&
+      policy.isReferenceMode !== false &&
+      policy.showVideoReferenceSection === true &&
+      policy.maxVideoCount > 0 &&
+      Boolean(policy.setReferenceVideos)
+    );
+  };
+  const audioReferencesSupported = () => {
+    const policy = livePolicyRef.current;
+    return (
+      mountedRef.current &&
+      policy.visible &&
+      policy.isVideo === true &&
+      policy.isReferenceMode !== false &&
+      policy.showVideoReferenceSection === true &&
+      policy.maxAudioCount > 0 &&
+      Boolean(policy.setReferenceAudios)
+    );
+  };
+
+  const cancelImageOperations = (advanceEpoch = true) => {
+    if (advanceEpoch) imageEpochRef.current += 1;
+    cancelPending(pendingImageOperationsRef.current);
+    if (mountedRef.current) setUploadingImages([]);
+  };
+  const cancelEndOperations = (advanceEpoch = true) => {
+    if (advanceEpoch) endEpochRef.current += 1;
+    cancelPending(pendingEndOperationsRef.current);
+    if (mountedRef.current) setUploadingEnd(null);
+  };
+  const cancelVideoOperations = (advanceEpoch = true) => {
+    if (advanceEpoch) videoEpochRef.current += 1;
+    cancelPending(pendingVideoOperationsRef.current);
+    cancelPending(pendingVideoGalleryProbesRef.current);
+    videoOperationsRef.current = Promise.resolve();
+    if (mountedRef.current) {
+      setUploadingVideo(null);
+      setIsProcessingGallery(false);
+    }
+  };
+  const cancelAudioOperations = (advanceEpoch = true) => {
+    if (advanceEpoch) audioEpochRef.current += 1;
+    cancelPending(pendingAudioOperationsRef.current);
+    audioOperationsRef.current = Promise.resolve();
+    if (mountedRef.current) setUploadingAudio(null);
+  };
+
+  const appliedPolicySignaturesRef = useRef(
+    renderedPolicySignaturesRef.current,
+  );
   useEffect(() => {
-    referenceImagesRef.current = referenceImages;
-  }, [referenceImages]);
+    const previous = appliedPolicySignaturesRef.current;
+    if (previous.image !== imagePolicySignature) {
+      cancelImageOperations(false);
+    }
+    if (previous.end !== endPolicySignature) {
+      cancelEndOperations(false);
+    }
+    if (previous.video !== videoPolicySignature) {
+      cancelVideoOperations(false);
+    }
+    if (previous.audio !== audioPolicySignature) {
+      cancelAudioOperations(false);
+    }
+    if (
+      previous.image !== imagePolicySignature ||
+      previous.end !== endPolicySignature ||
+      previous.video !== videoPolicySignature ||
+      previous.audio !== audioPolicySignature
+    ) {
+      setIsGalleryModalOpen(false);
+      setSelectedGalleryImages([]);
+    }
+    appliedPolicySignaturesRef.current = {
+      image: imagePolicySignature,
+      end: endPolicySignature,
+      video: videoPolicySignature,
+      audio: audioPolicySignature,
+    };
+  }, [
+    imagePolicySignature,
+    endPolicySignature,
+    videoPolicySignature,
+    audioPolicySignature,
+  ]);
+
+  useEffect(() => {
+    if (imagesExternallyCleared) cancelImageOperations(false);
+    if (videosExternallyCleared) cancelVideoOperations(false);
+    if (audiosExternallyCleared) cancelAudioOperations(false);
+  }, [referenceImages, referenceVideos, referenceAudios]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      imageEpochRef.current += 1;
+      endEpochRef.current += 1;
+      videoEpochRef.current += 1;
+      audioEpochRef.current += 1;
+      cancelPending(pendingImageOperationsRef.current);
+      cancelPending(pendingEndOperationsRef.current);
+      cancelPending(pendingVideoOperationsRef.current);
+      cancelPending(pendingVideoGalleryProbesRef.current);
+      cancelPending(pendingAudioOperationsRef.current);
+      videoOperationsRef.current = Promise.resolve();
+      audioOperationsRef.current = Promise.resolve();
+    };
+  }, []);
 
   const allowReorder = useMemo(
     () => maxImagePromptCount > 1 && referenceImages.length > 1,
@@ -277,6 +618,7 @@ export const ImagePromptRow = ({
           </div>
         )}
         <button
+          aria-label={`Remove reference image ${index + 1}`}
           onClick={(e) => {
             e.stopPropagation();
             handleRemoveReference(image.id);
@@ -298,11 +640,11 @@ export const ImagePromptRow = ({
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
-    const oldIndex = referenceImages.findIndex((img) => img.id === active.id);
-    const newIndex = referenceImages.findIndex((img) => img.id === over.id);
+    const current = referenceImagesRef.current;
+    const oldIndex = current.findIndex((img) => img.id === active.id);
+    const newIndex = current.findIndex((img) => img.id === over.id);
     if (oldIndex === -1 || newIndex === -1) return;
-    const newOrder = arrayMove(referenceImages, oldIndex, newIndex);
-    setReferenceImages(newOrder);
+    publishImages(arrayMove(current, oldIndex, newIndex));
   };
 
   const usedSlotsRender = useMemo(
@@ -336,7 +678,9 @@ export const ImagePromptRow = ({
   ]);
 
   const handleRemoveReference = (id: string) => {
-    setReferenceImages(referenceImages.filter((img) => img.id !== id));
+    publishImages(
+      referenceImagesRef.current.filter((image) => image.id !== id),
+    );
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -354,29 +698,65 @@ export const ImagePromptRow = ({
     videoFileInputRef.current?.click();
   };
 
-  const referenceVideosRef = useRef(referenceVideos);
-  useEffect(() => {
-    referenceVideosRef.current = referenceVideos;
-  }, [referenceVideos]);
-
-  const getVideoDurationFromSrc = (src: string): Promise<number> =>
+  const probeMediaDuration = (
+    kind: "video" | "audio",
+    src: string,
+    pending: Set<PendingCancellation>,
+    releaseOwnedUrl?: () => void,
+  ): Promise<number | null> =>
     new Promise((resolve) => {
-      const video = document.createElement("video");
-      video.preload = "metadata";
-      video.onloadedmetadata = () => resolve(Math.round(video.duration));
-      video.onerror = () => resolve(0);
-      video.src = src;
+      const media = document.createElement(kind);
+      let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const finish = (duration: number | null) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+        pending.delete(cancel);
+        media.onloadedmetadata = null;
+        media.onerror = null;
+        media.removeAttribute("src");
+        releaseOwnedUrl?.();
+        resolve(duration);
+      };
+      const cancel = () => finish(null);
+      pending.add(cancel);
+      media.preload = "metadata";
+      media.onloadedmetadata = () =>
+        finish(normalizeMediaDurationSeconds(media.duration));
+      media.onerror = () => finish(null);
+      timeoutId = setTimeout(
+        () => finish(null),
+        MEDIA_DURATION_PROBE_TIMEOUT_MS,
+      );
+      try {
+        media.src = src;
+      } catch {
+        finish(null);
+      }
     });
 
-  const getVideoDuration = (file: File): Promise<number> => {
-    const src = URL.createObjectURL(file);
-    return getVideoDurationFromSrc(src).finally(() => URL.revokeObjectURL(src));
+  const getVideoDurationFromSrc = (src: string): Promise<number | null> =>
+    probeMediaDuration("video", src, pendingVideoGalleryProbesRef.current);
+
+  const getVideoDuration = (file: File): Promise<number | null> => {
+    const src = createOwnedMediaObjectUrl(file);
+    return probeMediaDuration(
+      "video",
+      src,
+      pendingVideoOperationsRef.current,
+      () => discardOwnedMediaObjectUrl(src),
+    );
   };
 
-  const totalVideoDuration = useMemo(
-    () => referenceVideos.reduce((sum, v) => sum + v.duration, 0),
+  const totalVideoDurationMillis = useMemo(
+    () => sumMediaDurationMillis(referenceVideos.map((v) => v.duration)),
     [referenceVideos],
   );
+  const totalVideoDurationDisplay =
+    referenceVideos.length === 0
+      ? "0"
+      : formatMediaDurationMillis(totalVideoDurationMillis ?? Number.NaN);
 
   // Tokens already in the slot the picker targets, greyed out in the gallery
   // so one media file can't be added twice to the same field. Reusing an image
@@ -395,89 +775,162 @@ export const ImagePromptRow = ({
       .filter((t): t is string => !!t);
   }, [galleryTarget, referenceImages, referenceVideos, endFrameImage]);
 
+  const processVideoFiles = async (files: File[], operationEpoch: number) => {
+    if (
+      operationEpoch !== videoEpochRef.current ||
+      !videoReferencesSupported()
+    ) {
+      return;
+    }
+
+    const policy = livePolicyRef.current;
+    const availableSlots = Math.max(
+      0,
+      policy.maxVideoCount - referenceVideosRef.current.length,
+    );
+    if (availableSlots <= 0) {
+      toast.error(
+        `Max ${policy.maxVideoCount} videos / ${policy.maxVideoRefDuration}s total`,
+        { id: "video-ref-limit" },
+      );
+      return;
+    }
+
+    const filesToProcess = files.slice(0, availableSlots);
+    for (const file of filesToProcess) {
+      if (
+        operationEpoch !== videoEpochRef.current ||
+        !videoReferencesSupported()
+      ) {
+        return;
+      }
+      const duration = await getVideoDuration(file);
+      if (
+        operationEpoch !== videoEpochRef.current ||
+        !videoReferencesSupported()
+      ) {
+        return;
+      }
+      if (duration == null) {
+        toast.error("Could not read video duration", {
+          id: "video-ref-duration",
+        });
+        continue;
+      }
+
+      const uploadId = Math.random().toString(36).substring(7);
+      const previewUrl = createOwnedMediaObjectUrl(file);
+      setUploadingVideo({ id: uploadId, file, previewUrl });
+      let settled = false;
+
+      const finish = (keepPreview: boolean) => {
+        if (settled) return;
+        settled = true;
+        pendingVideoOperationsRef.current.delete(cancel);
+        if (!keepPreview) discardOwnedMediaObjectUrl(previewUrl);
+        if (mountedRef.current) setUploadingVideo(null);
+      };
+      const cancel = () => finish(false);
+      pendingVideoOperationsRef.current.add(cancel);
+
+      const commit = (mediaToken: string) => {
+        if (settled) return;
+        if (
+          operationEpoch !== videoEpochRef.current ||
+          !videoReferencesSupported()
+        ) {
+          cancel();
+          return;
+        }
+        const currentPolicy = livePolicyRef.current;
+        const candidate: RefVideo = {
+          id: Math.random().toString(36).substring(7),
+          url: previewUrl,
+          file,
+          mediaToken,
+          duration,
+        };
+        const result = appendMediaReference(
+          referenceVideosRef.current,
+          candidate,
+          {
+            maxCount: currentPolicy.maxVideoCount,
+            maxTotalSeconds: currentPolicy.maxVideoRefDuration,
+          },
+        );
+        if (result.status === "added" && publishVideos(result.next)) {
+          finish(true);
+        } else if (result.status !== "duplicate") {
+          finish(false);
+          toast.error(
+            result.status === "invalid-duration"
+              ? "Could not verify video duration"
+              : `Total video duration cannot exceed ${currentPolicy.maxVideoRefDuration}s`,
+            { id: "video-ref-limit" },
+          );
+        } else {
+          finish(false);
+        }
+      };
+
+      const reject = (showError: boolean) => {
+        if (settled) return;
+        cancel();
+        if (showError && videoReferencesSupported()) {
+          toast.error("Failed to upload video. Please upload an MP4 file.");
+        }
+      };
+
+      if (uploadVideo) {
+        try {
+          await uploadVideo({
+            title: `reference-video-${Math.random()
+              .toString(36)
+              .substring(2, 15)}`,
+            assetFile: file,
+            progressCallback: (newState) => {
+              if (newState.status === UploaderStates.success && newState.data) {
+                commit(newState.data);
+              } else if (
+                newState.status === UploaderStates.assetError ||
+                newState.status === UploaderStates.imageCreateError
+              ) {
+                reject(true);
+              }
+            },
+          });
+        } catch {
+          reject(true);
+        } finally {
+          reject(false);
+        }
+      } else {
+        commit("");
+      }
+    }
+  };
+
   const handleVideoFileUpload = async (
     event: React.ChangeEvent<HTMLInputElement>,
   ) => {
     const files = Array.from(event.target.files || []);
     if (files.length === 0) return;
-
-    // Snapshot the committed state at call time so removes that happened
-    // before this call are respected (don't re-read a stale ref).
-    const baseVideos = [...referenceVideos];
-    const availableSlots = Math.max(0, maxVideoCount - baseVideos.length);
-    if (availableSlots <= 0) {
-      toast.error(
-        `Max ${maxVideoCount} videos / ${maxVideoRefDuration}s total`,
-        { id: "video-ref-limit" },
-      );
-      if (videoFileInputRef.current) videoFileInputRef.current.value = "";
-      return;
-    }
-
-    const filesToProcess = files.slice(0, availableSlots);
-    let committed = baseVideos;
-
-    for (const file of filesToProcess) {
-      const duration = await getVideoDuration(file);
-      const currentTotal = committed.reduce((sum, v) => sum + v.duration, 0);
-
-      if (currentTotal + duration > maxVideoRefDuration) {
-        toast.error(
-          `Total video duration cannot exceed ${maxVideoRefDuration}s`,
-          { id: "video-ref-limit" },
-        );
-        break;
-      }
-
-      const uploadId = Math.random().toString(36).substring(7);
-      setUploadingVideo({ id: uploadId, file });
-
-      if (uploadVideo) {
-        await uploadVideo({
-          title: `reference-video-${Math.random()
-            .toString(36)
-            .substring(2, 15)}`,
-          assetFile: file,
-          progressCallback: (newState) => {
-            if (newState.status === UploaderStates.success && newState.data) {
-              const refVideo: RefVideo = {
-                id: Math.random().toString(36).substring(7),
-                url: URL.createObjectURL(file),
-                file,
-                mediaToken: newState.data,
-                duration,
-              };
-              setUploadingVideo(null);
-              committed = [...committed, refVideo];
-              setReferenceVideos?.(committed);
-            } else if (
-              newState.status === UploaderStates.assetError ||
-              newState.status === UploaderStates.imageCreateError
-            ) {
-              setUploadingVideo(null);
-              toast.error("Failed to upload video. Please upload an MP4 file.");
-            }
-          },
-        });
-      } else {
-        const refVideo: RefVideo = {
-          id: Math.random().toString(36).substring(7),
-          url: URL.createObjectURL(file),
-          file,
-          mediaToken: "",
-          duration,
-        };
-        setUploadingVideo(null);
-        committed = [...committed, refVideo];
-        setReferenceVideos?.(committed);
-      }
-    }
-
+    const operationEpoch = videoEpochRef.current;
+    const operation = videoOperationsRef.current.then(() =>
+      processVideoFiles(files, operationEpoch),
+    );
+    videoOperationsRef.current = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    await operation;
     if (videoFileInputRef.current) videoFileInputRef.current.value = "";
   };
 
   const handleRemoveVideo = (id: string) => {
-    setReferenceVideos?.(referenceVideos.filter((v) => v.id !== id));
+    publishVideos(
+      referenceVideosRef.current.filter((video) => video.id !== id),
+    );
     if (videoFileInputRef.current) videoFileInputRef.current.value = "";
   };
 
@@ -485,110 +938,180 @@ export const ImagePromptRow = ({
     audioFileInputRef.current?.click();
   };
 
-  const referenceAudiosRef = useRef(referenceAudios);
-  useEffect(() => {
-    referenceAudiosRef.current = referenceAudios;
-  }, [referenceAudios]);
+  const getAudioDuration = (file: File): Promise<number | null> => {
+    const src = createOwnedMediaObjectUrl(file);
+    return probeMediaDuration(
+      "audio",
+      src,
+      pendingAudioOperationsRef.current,
+      () => discardOwnedMediaObjectUrl(src),
+    );
+  };
 
-  const getAudioDuration = (file: File): Promise<number> =>
-    new Promise((resolve) => {
-      const audio = document.createElement("audio");
-      audio.preload = "metadata";
-      audio.onloadedmetadata = () => {
-        URL.revokeObjectURL(audio.src);
-        resolve(Math.round(audio.duration));
-      };
-      audio.onerror = () => {
-        URL.revokeObjectURL(audio.src);
-        resolve(0);
-      };
-      audio.src = URL.createObjectURL(file);
-    });
-
-  const totalAudioDuration = useMemo(
-    () => referenceAudios.reduce((sum, a) => sum + a.duration, 0),
+  const totalAudioDurationMillis = useMemo(
+    () => sumMediaDurationMillis(referenceAudios.map((a) => a.duration)),
     [referenceAudios],
   );
+  const totalAudioDurationDisplay =
+    referenceAudios.length === 0
+      ? "0"
+      : formatMediaDurationMillis(totalAudioDurationMillis ?? Number.NaN);
 
-  const handleAudioFileUpload = async (
-    event: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    const files = Array.from(event.target.files || []);
-    if (files.length === 0) return;
+  const processAudioFiles = async (files: File[], operationEpoch: number) => {
+    if (
+      operationEpoch !== audioEpochRef.current ||
+      !audioReferencesSupported()
+    ) {
+      return;
+    }
 
     const audioFiles = files.filter(isAudioFile);
     if (audioFiles.length < files.length) {
       toast.error(AUDIO_FILE_TYPE_ERROR);
     }
 
-    const availableSlots = Math.max(0, maxAudioCount - referenceAudios.length);
+    const policy = livePolicyRef.current;
+    const availableSlots = Math.max(
+      0,
+      policy.maxAudioCount - referenceAudiosRef.current.length,
+    );
     if (audioFiles.length === 0 || availableSlots <= 0) {
-      if (audioFileInputRef.current) audioFileInputRef.current.value = "";
       return;
     }
 
     const filesToProcess = audioFiles.slice(0, availableSlots);
-
     for (const file of filesToProcess) {
-      const duration = await getAudioDuration(file);
-      const currentTotal = referenceAudiosRef.current.reduce(
-        (sum, a) => sum + a.duration,
-        0,
-      );
-
-      if (currentTotal + duration > maxAudioRefDuration) {
-        toast.error(
-          `Total audio duration cannot exceed ${maxAudioRefDuration}s`,
-        );
-        break;
+      if (
+        operationEpoch !== audioEpochRef.current ||
+        !audioReferencesSupported()
+      ) {
+        return;
       }
-
-      const uploadId = Math.random().toString(36).substring(7);
-      setUploadingAudio({ id: uploadId, file });
-
-      if (uploadAudio) {
-        await uploadAudio({
-          title: `reference-audio-${Math.random()
-            .toString(36)
-            .substring(2, 15)}`,
-          assetFile: file,
-          progressCallback: (newState) => {
-            if (newState.status === UploaderStates.success && newState.data) {
-              const refAudio: RefAudio = {
-                id: Math.random().toString(36).substring(7),
-                url: URL.createObjectURL(file),
-                file,
-                mediaToken: newState.data,
-                duration,
-              };
-              setUploadingAudio(null);
-              setReferenceAudios?.([...referenceAudiosRef.current, refAudio]);
-            } else if (
-              newState.status === UploaderStates.assetError ||
-              newState.status === UploaderStates.imageCreateError
-            ) {
-              setUploadingAudio(null);
-            }
-          },
+      const duration = await getAudioDuration(file);
+      if (
+        operationEpoch !== audioEpochRef.current ||
+        !audioReferencesSupported()
+      ) {
+        return;
+      }
+      if (duration == null) {
+        toast.error("Could not read audio duration", {
+          id: "audio-ref-duration",
         });
-      } else {
-        const refAudio: RefAudio = {
+        continue;
+      }
+      const uploadId = Math.random().toString(36).substring(7);
+      const previewUrl = createOwnedMediaObjectUrl(file);
+      setUploadingAudio({ id: uploadId, file, previewUrl });
+      let settled = false;
+
+      const finish = (keepPreview: boolean) => {
+        if (settled) return;
+        settled = true;
+        pendingAudioOperationsRef.current.delete(cancel);
+        if (!keepPreview) discardOwnedMediaObjectUrl(previewUrl);
+        if (mountedRef.current) setUploadingAudio(null);
+      };
+      const cancel = () => finish(false);
+      pendingAudioOperationsRef.current.add(cancel);
+
+      const commit = (mediaToken: string) => {
+        if (settled) return;
+        if (
+          operationEpoch !== audioEpochRef.current ||
+          !audioReferencesSupported()
+        ) {
+          cancel();
+          return;
+        }
+        const currentPolicy = livePolicyRef.current;
+        const candidate: RefAudio = {
           id: Math.random().toString(36).substring(7),
-          url: URL.createObjectURL(file),
+          url: previewUrl,
           file,
-          mediaToken: "",
+          mediaToken,
           duration,
         };
-        setUploadingAudio(null);
-        setReferenceAudios?.([...referenceAudiosRef.current, refAudio]);
+        const result = appendMediaReference(
+          referenceAudiosRef.current,
+          candidate,
+          {
+            maxCount: currentPolicy.maxAudioCount,
+            maxTotalSeconds: currentPolicy.maxAudioRefDuration,
+          },
+        );
+        if (result.status === "added" && publishAudios(result.next)) {
+          finish(true);
+        } else if (result.status !== "duplicate") {
+          finish(false);
+          toast.error(
+            result.status === "invalid-duration"
+              ? "Could not verify audio duration"
+              : `Total audio duration cannot exceed ${currentPolicy.maxAudioRefDuration}s`,
+          );
+        } else {
+          finish(false);
+        }
+      };
+
+      const reject = () => {
+        if (settled) return;
+        cancel();
+      };
+
+      if (uploadAudio) {
+        try {
+          await uploadAudio({
+            title: `reference-audio-${Math.random()
+              .toString(36)
+              .substring(2, 15)}`,
+            assetFile: file,
+            progressCallback: (newState) => {
+              if (newState.status === UploaderStates.success && newState.data) {
+                commit(newState.data);
+              } else if (
+                newState.status === UploaderStates.assetError ||
+                newState.status === UploaderStates.imageCreateError
+              ) {
+                reject();
+              }
+            },
+          });
+        } catch {
+          reject();
+          if (audioReferencesSupported()) {
+            toast.error("Failed to upload audio. Please try again.");
+          }
+        } finally {
+          reject();
+        }
+      } else {
+        commit("");
       }
     }
+  };
 
+  const handleAudioFileUpload = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) return;
+    const operationEpoch = audioEpochRef.current;
+    const operation = audioOperationsRef.current.then(() =>
+      processAudioFiles(files, operationEpoch),
+    );
+    audioOperationsRef.current = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    await operation;
     if (audioFileInputRef.current) audioFileInputRef.current.value = "";
   };
 
   const handleRemoveAudio = (id: string) => {
-    setReferenceAudios?.(referenceAudios.filter((a) => a.id !== id));
+    publishAudios(
+      referenceAudiosRef.current.filter((audio) => audio.id !== id),
+    );
     if (audioFileInputRef.current) audioFileInputRef.current.value = "";
   };
 
@@ -596,99 +1119,151 @@ export const ImagePromptRow = ({
     const files = Array.from(event.target.files || []);
     if (files.length === 0) return;
 
-    const currentCount = referenceImages.length + uploadingImages.length;
-    const availableSlots = Math.max(0, maxImagePromptCount - currentCount);
-    if (availableSlots <= 0 && uploadTarget !== "end") {
+    const target = uploadTarget;
+    if (target === "end" ? !endUploadSupported() : !imageUploadSupported()) {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    const policy = livePolicyRef.current;
+    const currentCount =
+      referenceImagesRef.current.length +
+      pendingImageOperationsRef.current.size;
+    const availableSlots = Math.max(
+      0,
+      policy.maxImagePromptCount - currentCount,
+    );
+    if (availableSlots <= 0 && target !== "end") {
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
 
     const filesToProcess =
-      uploadTarget === "end"
-        ? files.slice(0, 1)
-        : files.slice(0, availableSlots);
+      target === "end" ? files.slice(0, 1) : files.slice(0, availableSlots);
 
     filesToProcess.forEach((file) => {
+      const operationEpoch =
+        target === "end" ? endEpochRef.current : imageEpochRef.current;
       const uploadId = Math.random().toString(36).substring(7);
-      if (uploadTarget === "end") {
-        setUploadingEnd({ id: uploadId, file });
+      const previewUrl = createOwnedMediaObjectUrl(file);
+      if (target === "end") {
+        setUploadingEnd({ id: uploadId, file, previewUrl });
       } else {
-        setUploadingImages((prev) => [...prev, { id: uploadId, file }]);
+        setUploadingImages((prev) => [
+          ...prev,
+          { id: uploadId, file, previewUrl },
+        ]);
       }
 
+      let settled = false;
+      const pending =
+        target === "end"
+          ? pendingEndOperationsRef.current
+          : pendingImageOperationsRef.current;
       const reader = new FileReader();
-      reader.onloadend = async () => {
-        if (uploadImage) {
-          await uploadImage({
-            title: `reference-image-${Math.random()
-              .toString(36)
-              .substring(2, 15)}`,
-            assetFile: file,
-            progressCallback: (newState) => {
-              if (newState.status === UploaderStates.success && newState.data) {
-                const referenceImage: RefImage = {
-                  id: Math.random().toString(36).substring(7),
-                  url: reader.result as string,
-                  file,
-                  mediaToken: newState.data,
-                };
-                if (uploadTarget === "end") {
-                  setUploadingEnd(null);
-                } else {
-                  setUploadingImages((prev) =>
-                    prev.filter((img) => img.id !== uploadId),
-                  );
-                }
-                if (uploadTarget === "end") {
-                  setEndFrameImage?.(referenceImage);
-                } else {
-                  setReferenceImages([
-                    ...referenceImagesRef.current,
-                    referenceImage,
-                  ]);
-                }
-              } else if (
-                newState.status === UploaderStates.assetError ||
-                newState.status === UploaderStates.imageCreateError
-              ) {
-                if (uploadTarget === "end") {
-                  setUploadingEnd(null);
-                } else {
-                  setUploadingImages((prev) =>
-                    prev.filter((img) => img.id !== uploadId),
-                  );
-                }
-              }
-            },
-          });
-        } else {
-          const referenceImage: RefImage = {
-            id: Math.random().toString(36).substring(7),
-            url: reader.result as string,
-            file,
-            mediaToken: "",
-          };
-          if (uploadTarget === "end") {
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        pending.delete(cancel);
+        discardOwnedMediaObjectUrl(previewUrl);
+        if (mountedRef.current) {
+          if (target === "end") {
             setUploadingEnd(null);
           } else {
             setUploadingImages((prev) =>
-              prev.filter((img) => img.id !== uploadId),
+              prev.filter((image) => image.id !== uploadId),
             );
           }
-          if (uploadTarget === "end") {
-            setEndFrameImage?.(referenceImage);
-          } else {
-            setReferenceImages([...referenceImagesRef.current, referenceImage]);
+        }
+      };
+      const cancel = () => {
+        reader.onloadend = null;
+        reader.onerror = null;
+        if (reader.readyState === FileReader.LOADING) reader.abort();
+        finish();
+      };
+      const reject = cancel;
+      pending.add(cancel);
+      const commit = (url: string, mediaToken: string) => {
+        if (settled) return;
+        const stillCurrent =
+          target === "end"
+            ? operationEpoch === endEpochRef.current && endUploadSupported()
+            : operationEpoch === imageEpochRef.current &&
+              imageUploadSupported();
+        if (!stillCurrent) {
+          cancel();
+          return;
+        }
+        const referenceImage: RefImage = {
+          id: Math.random().toString(36).substring(7),
+          url,
+          file,
+          mediaToken,
+        };
+        finish();
+        if (target === "end") {
+          livePolicyRef.current.setEndFrameImage?.(referenceImage);
+          return;
+        }
+        const current = referenceImagesRef.current;
+        if (current.length < livePolicyRef.current.maxImagePromptCount) {
+          publishImages([...current, referenceImage]);
+        }
+      };
+
+      reader.onloadend = async () => {
+        if (typeof reader.result !== "string") {
+          reject();
+          return;
+        }
+        if (uploadImage) {
+          try {
+            await uploadImage({
+              title: `reference-image-${Math.random()
+                .toString(36)
+                .substring(2, 15)}`,
+              assetFile: file,
+              progressCallback: (newState) => {
+                if (
+                  newState.status === UploaderStates.success &&
+                  newState.data
+                ) {
+                  commit(reader.result as string, newState.data);
+                } else if (
+                  newState.status === UploaderStates.assetError ||
+                  newState.status === UploaderStates.imageCreateError
+                ) {
+                  reject();
+                }
+              },
+            });
+          } catch {
+            if (
+              target === "end" ? endUploadSupported() : imageUploadSupported()
+            ) {
+              toast.error("Failed to upload image. Please try again.");
+            }
+          } finally {
+            reject();
           }
+        } else {
+          commit(reader.result, "");
         }
 
         if (fileInputRef.current) fileInputRef.current.value = "";
       };
+      reader.onerror = () => reject();
       reader.readAsDataURL(file);
     });
   };
 
   const handleGalleryClose = () => {
+    if (galleryTarget === "video") {
+      videoGalleryEpochRef.current += 1;
+      cancelPending(pendingVideoGalleryProbesRef.current);
+    }
+    setIsProcessingGallery(false);
     setIsGalleryModalOpen(false);
     setSelectedGalleryImages([]);
   };
@@ -710,14 +1285,19 @@ export const ImagePromptRow = ({
   };
 
   const handleGalleryImages = async (selectedItems: GalleryItem[]) => {
-    if (galleryTarget === "video") {
-      // Snapshot committed state at call time to avoid re-reading a stale
-      // ref after removes.
-      const baseVideos = [...referenceVideos];
-      const availableSlots = Math.max(0, maxVideoCount - baseVideos.length);
+    const target = galleryTarget;
+    if (target === "video") {
+      const operationEpoch = videoEpochRef.current;
+      const galleryEpoch = videoGalleryEpochRef.current;
+      if (!videoReferencesSupported()) return;
+      const policy = livePolicyRef.current;
+      const availableSlots = Math.max(
+        0,
+        policy.maxVideoCount - referenceVideosRef.current.length,
+      );
       if (availableSlots <= 0) {
         toast.error(
-          `Max ${maxVideoCount} videos / ${maxVideoRefDuration}s total`,
+          `Max ${policy.maxVideoCount} videos / ${policy.maxVideoRefDuration}s total`,
           { id: "video-ref-limit" },
         );
         setIsGalleryModalOpen(false);
@@ -732,54 +1312,86 @@ export const ImagePromptRow = ({
 
       setIsProcessingGallery(true);
       try {
-        // Parallelize duration probes — sequential metadata loads was the
-        // source of the perceived lag on the "Use selected" click.
+        // Probe the actual selected URL so duration/cap state cannot inherit
+        // stale list metadata.
         const durations = await Promise.all(
           itemsToProcess.map((item) => getVideoDurationFromSrc(item.fullImage)),
         );
 
-        const newVideos: RefVideo[] = [];
-        let currentTotal = baseVideos.reduce((sum, v) => sum + v.duration, 0);
+        if (
+          operationEpoch !== videoEpochRef.current ||
+          galleryEpoch !== videoGalleryEpochRef.current ||
+          !videoReferencesSupported()
+        ) {
+          return;
+        }
+
+        let nextVideos = referenceVideosRef.current;
         let exceeded = false;
         for (let i = 0; i < itemsToProcess.length; i++) {
           const item = itemsToProcess[i]!;
           const duration = durations[i]!;
-          if (currentTotal + duration > maxVideoRefDuration) {
+          if (duration == null) {
+            toast.error("Could not read video duration", {
+              id: "video-ref-duration",
+            });
+            continue;
+          }
+          const candidate: RefVideo = {
+            id: Math.random().toString(36).substring(7),
+            url: item.fullImage,
+            mediaToken: item.id,
+            duration,
+          };
+          const result = appendMediaReference(nextVideos, candidate, {
+            maxCount: livePolicyRef.current.maxVideoCount,
+            maxTotalSeconds: livePolicyRef.current.maxVideoRefDuration,
+          });
+          if (result.status === "invalid-duration") {
+            toast.error("Could not verify video duration", {
+              id: "video-ref-duration",
+            });
+            break;
+          }
+          if (
+            result.status === "over-count" ||
+            result.status === "over-duration"
+          ) {
             exceeded = true;
             break;
           }
-          currentTotal += duration;
-          newVideos.push({
-            id: Math.random().toString(36).substring(7),
-            url: item.fullImage,
-            file: new File([], "library-video"),
-            mediaToken: item.id,
-            duration,
-          });
+          if (result.status === "added") nextVideos = result.next;
         }
         if (exceeded) {
           toast.error(
-            `Total video duration cannot exceed ${maxVideoRefDuration}s`,
+            `Total video duration cannot exceed ${livePolicyRef.current.maxVideoRefDuration}s`,
             { id: "video-ref-limit" },
           );
         }
-        if (newVideos.length > 0) {
-          setReferenceVideos?.([...baseVideos, ...newVideos]);
+        if (nextVideos !== referenceVideosRef.current) {
+          publishVideos(nextVideos);
         }
       } finally {
-        setIsProcessingGallery(false);
+        if (mountedRef.current) setIsProcessingGallery(false);
+      }
+      if (
+        operationEpoch !== videoEpochRef.current ||
+        galleryEpoch !== videoGalleryEpochRef.current ||
+        !videoReferencesSupported()
+      ) {
+        return;
       }
       setIsGalleryModalOpen(false);
       setSelectedGalleryImages([]);
       return;
     }
-    if (galleryTarget === "end") {
+    if (target === "end") {
+      if (!endGallerySupported()) return;
       const item = selectedItems[0];
       if (item && item.fullImage) {
-        setEndFrameImage?.({
+        livePolicyRef.current.setEndFrameImage?.({
           id: Math.random().toString(36).substring(7),
           url: item.fullImage,
-          file: new File([], "library-image"),
           mediaToken: item.id,
         });
       }
@@ -787,9 +1399,11 @@ export const ImagePromptRow = ({
       setSelectedGalleryImages([]);
       return;
     }
+    if (!imageGallerySupported()) return;
     const availableSlots = Math.max(
       0,
-      maxImagePromptCount - referenceImages.length,
+      livePolicyRef.current.maxImagePromptCount -
+        referenceImagesRef.current.length,
     );
     if (availableSlots <= 0) {
       setIsGalleryModalOpen(false);
@@ -797,17 +1411,17 @@ export const ImagePromptRow = ({
       return;
     }
 
-    const newRefs = [...referenceImages];
+    const newRefs = [...referenceImagesRef.current];
     selectedItems.slice(0, availableSlots).forEach((item) => {
+      if (!imageGallerySupported()) return;
       if (!item.fullImage) return;
       newRefs.push({
         id: Math.random().toString(36).substring(7),
         url: item.fullImage,
-        file: new File([], "library-image"),
         mediaToken: item.id,
       });
     });
-    setReferenceImages(newRefs);
+    publishImages(newRefs);
     setIsGalleryModalOpen(false);
     setSelectedGalleryImages([]);
   };
@@ -933,6 +1547,7 @@ export const ImagePromptRow = ({
                           </div>
                         )}
                         <button
+                          aria-label={`Remove reference image ${index + 1}`}
                           onClick={(e) => {
                             e.stopPropagation();
                             handleRemoveReference(image.id);
@@ -951,8 +1566,7 @@ export const ImagePromptRow = ({
                     0,
                     Math.max(0, maxImagePromptCount - referenceImages.length),
                   )
-                  .map(({ id, file }) => {
-                    const previewUrl = URL.createObjectURL(file);
+                  .map(({ id, previewUrl }) => {
                     return (
                       <div
                         key={id}
@@ -1072,7 +1686,7 @@ export const ImagePromptRow = ({
                     <div className="glass relative aspect-square overflow-hidden rounded-lg w-14 border-2 border-white/30">
                       <div className="absolute inset-0">
                         <img
-                          src={URL.createObjectURL(uploadingEnd.file)}
+                          src={uploadingEnd.previewUrl}
                           alt="Uploading preview"
                           className="h-full w-full object-cover blur-sm"
                         />
@@ -1152,8 +1766,7 @@ export const ImagePromptRow = ({
                     </span>
                   </div>
                   <span className="text-[13px] text-base-fg/60">
-                    {formatMediaDurationSeconds(totalVideoDuration)}s /{" "}
-                    {maxVideoRefDuration}s max
+                    {totalVideoDurationDisplay}s / {maxVideoRefDuration}s max
                   </span>
                 </div>
                 <div className="flex gap-2 items-center">
@@ -1188,7 +1801,7 @@ export const ImagePromptRow = ({
                     <div className="glass relative aspect-square overflow-hidden rounded-lg w-14 border-2 border-white/30">
                       <div className="absolute inset-0">
                         <video
-                          src={URL.createObjectURL(uploadingVideo.file)}
+                          src={uploadingVideo.previewUrl}
                           muted
                           preload="metadata"
                           className="h-full w-full object-cover blur-sm"
@@ -1261,8 +1874,7 @@ export const ImagePromptRow = ({
                       </span>
                     </div>
                     <span className="text-[13px] text-base-fg/60">
-                      {formatMediaDurationSeconds(totalAudioDuration)}s /{" "}
-                      {maxAudioRefDuration}s max
+                      {totalAudioDurationDisplay}s / {maxAudioRefDuration}s max
                     </span>
                   </div>
                 </div>
@@ -1306,11 +1918,19 @@ export const ImagePromptRow = ({
             <Button
               variant="action"
               icon={Trash2Icon}
+              aria-label="Clear all references"
               className="h-8 w-3"
               onClick={() => {
-                setReferenceImages([]);
-                setReferenceVideos?.([]);
-                setReferenceAudios?.([]);
+                cancelImageOperations();
+                cancelEndOperations();
+                cancelVideoOperations();
+                cancelAudioOperations();
+                setIsGalleryModalOpen(false);
+                setSelectedGalleryImages([]);
+                publishImages([]);
+                livePolicyRef.current.setEndFrameImage?.(undefined);
+                publishVideos([]);
+                publishAudios([]);
               }}
             />
           </div>

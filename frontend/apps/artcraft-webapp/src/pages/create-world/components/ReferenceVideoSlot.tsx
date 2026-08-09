@@ -1,11 +1,16 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { LoaderCircleIcon, PlusIcon, VideoIcon, XIcon } from "lucide-react";
-import { UploaderStates } from "@storyteller/common";
+import {
+  UploaderStates,
+  createOwnedMediaObjectUrl,
+  discardOwnedMediaObjectUrl,
+} from "@storyteller/common";
 import {
   uploadVideo,
   getVideoDuration,
 } from "../../../components/prompt-box/upload-media";
 import type { RefVideo } from "../../../components/prompt-box";
+import { toast } from "../../../components/toast/toast";
 
 // A single optional reference video for splat generation (mobile form band;
 // the desktop prompt box renders the same ref in its reference deck).
@@ -22,41 +27,110 @@ export function ReferenceVideoSlot({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
+  const operationEpochRef = useRef(0);
+  const mountedRef = useRef(true);
+  const onChangeRef = useRef(onChange);
+  const previousVideoRef = useRef(video);
+  const lastPublishedVideoRef = useRef<RefVideo | undefined>(undefined);
+  onChangeRef.current = onChange;
+  if (previousVideoRef.current !== video) {
+    if (lastPublishedVideoRef.current !== video) operationEpochRef.current++;
+    previousVideoRef.current = video;
+    lastPublishedVideoRef.current = undefined;
+  }
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      operationEpochRef.current++;
+    };
+  }, []);
 
   const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    const operationEpoch = operationEpochRef.current;
     setUploading(true);
-    const previewUrl = URL.createObjectURL(file);
-    const duration = await getVideoDuration(file);
-    await uploadVideo({
-      title: "splat_reference",
-      assetFile: file,
-      progressCallback: (state) => {
-        if (state.status === UploaderStates.success && state.data) {
-          onChange({
-            id: Math.random().toString(36).substring(7),
-            url: previewUrl,
-            file,
-            mediaToken: state.data,
-            duration,
-          });
-          setUploading(false);
-        } else if (
-          state.status === UploaderStates.assetError ||
-          state.status === UploaderStates.imageCreateError
-        ) {
-          URL.revokeObjectURL(previewUrl);
-          setUploading(false);
-        }
-      },
-    });
-    if (inputRef.current) inputRef.current.value = "";
+    let previewUrl: string | null = null;
+    let retainPreview = false;
+    let settled = false;
+    try {
+      const duration = await getVideoDuration(file);
+      if (!mountedRef.current || operationEpoch !== operationEpochRef.current) {
+        return;
+      }
+      if (duration == null) {
+        toast.error("Could not read video file");
+        return;
+      }
+
+      const createdPreviewUrl = createOwnedMediaObjectUrl(file);
+      previewUrl = createdPreviewUrl;
+      await uploadVideo({
+        title: "splat_reference",
+        assetFile: file,
+        progressCallback: (state) => {
+          if (state.status === UploaderStates.success && state.data) {
+            if (settled) return;
+            if (
+              !mountedRef.current ||
+              operationEpoch !== operationEpochRef.current
+            ) {
+              settled = true;
+              return;
+            }
+            settled = true;
+            const next: RefVideo = {
+              id: Math.random().toString(36).substring(7),
+              url: createdPreviewUrl,
+              file,
+              mediaToken: state.data,
+              duration,
+            };
+            lastPublishedVideoRef.current = next;
+            onChangeRef.current(next);
+            retainPreview = true;
+          } else if (
+            state.status === UploaderStates.assetError ||
+            state.status === UploaderStates.imageCreateError
+          ) {
+            if (settled) return;
+            settled = true;
+            retainPreview = false;
+            if (
+              mountedRef.current &&
+              operationEpoch === operationEpochRef.current
+            ) {
+              toast.error(
+                state.errorMessage ||
+                  "Failed to upload video. Please upload an MP4 file.",
+              );
+            }
+          }
+        },
+      });
+    } catch {
+      if (mountedRef.current && operationEpoch === operationEpochRef.current) {
+        toast.error("Failed to upload video. Please upload an MP4 file.");
+      }
+    } finally {
+      settled = true;
+      if (previewUrl && !retainPreview) {
+        discardOwnedMediaObjectUrl(previewUrl);
+      }
+      if (mountedRef.current && operationEpoch === operationEpochRef.current) {
+        setUploading(false);
+        if (inputRef.current) inputRef.current.value = "";
+      }
+    }
   };
 
   const handleRemove = () => {
-    if (video?.url.startsWith("blob:")) URL.revokeObjectURL(video.url);
-    onChange(undefined);
+    operationEpochRef.current++;
+    setUploading(false);
+    lastPublishedVideoRef.current = undefined;
+    onChangeRef.current(undefined);
   };
 
   return (
@@ -68,7 +142,9 @@ export function ReferenceVideoSlot({
           <VideoIcon  className="h-3.5 w-3.5" />
           <span className="text-sm font-medium">Reference video</span>
         </div>
-        <span className="text-[13px] text-white/60">Guide the world (optional)</span>
+        <span className="text-[13px] text-white/60">
+          Guide the world (optional)
+        </span>
       </div>
       <input
         type="file"

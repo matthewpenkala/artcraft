@@ -3,14 +3,14 @@ export interface RefImage {
   url: string;
   /** Full-res URL for the deck preview modal; falls back to `url`. */
   fullUrl?: string;
-  file: File;
+  file?: File;
   mediaToken: string;
 }
 
 export interface RefVideo {
   id: string;
   url: string;
-  file: File;
+  file?: File;
   mediaToken: string;
   duration: number;
 }
@@ -18,7 +18,7 @@ export interface RefVideo {
 export interface RefAudio {
   id: string;
   url: string;
-  file: File;
+  file?: File;
   mediaToken: string;
   duration: number;
 }

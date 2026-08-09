@@ -50,10 +50,7 @@ import {
   enqueueVideoGeneration,
   startVideoPolling,
 } from "./generate-video-api";
-import {
-  buildProbedTimedRefsToAdd,
-  buildProbedVideoRefsToAdd,
-} from "./reference-video-candidates";
+import { applyPendingVideoReferenceBatch } from "./pending-video-reference-coordinator";
 import {
   AspectRatioIcon,
   AutoIcon,
@@ -84,7 +81,11 @@ import {
 import { useSignupCta } from "../../components/signup-cta-modal";
 import { useInsufficientCredits } from "../../components/insufficient-credits-modal";
 import { toast } from "../../components/toast/toast";
-import { formatMediaDurationSeconds } from "@storyteller/common";
+import {
+  appendProbedMediaReferenceBatch,
+  formatMediaDurationSeconds,
+  remainingMediaDurationSeconds,
+} from "@storyteller/common";
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -200,34 +201,6 @@ function buildSizePopoverItems(
     ),
     action: ar,
   }));
-}
-
-// Caps candidate reference videos against the deck's slot and total-duration
-// limits. Always probe the current URL: gallery duration metadata can be stale,
-// while generation measures the actual file. Rejections toast per video.
-// Shared by the library video picker and the "Send to prompt" consume flow.
-async function buildVideoRefsToAdd(
-  candidates: RefVideo[],
-  existing: RefVideo[],
-  maxRefs: number,
-  maxTotalDuration: number,
-): Promise<RefVideo[]> {
-  return buildProbedVideoRefsToAdd(
-    candidates,
-    existing,
-    maxRefs,
-    maxTotalDuration,
-    getVideoDurationFromUrl,
-    (rejection) => {
-      if (rejection.reason === "unreadable") {
-        toast.error("Could not read video file");
-        return;
-      }
-      toast.error(
-        `Video too long — max ${maxTotalDuration}s total (${formatMediaDurationSeconds(rejection.remainingSeconds)}s remaining)`,
-      );
-    },
-  );
 }
 
 // Effective max duration for the active input mode. Some models (e.g. Grok)
@@ -376,6 +349,7 @@ export default function CreateVideo() {
   const setRefs = useCreateVideoStore((s) => s.setRefs);
   const { referenceImages, endFrameImage, referenceVideos, referenceAudios } =
     refs;
+  const referencePickerEpochRef = useRef(0);
   const setReferenceImages = useCallback(
     (v: RefImage[]) => setRefs({ referenceImages: v }),
     [setRefs],
@@ -384,12 +358,23 @@ export default function CreateVideo() {
     (v?: RefImage) => setRefs({ endFrameImage: v }),
     [setRefs],
   );
+  const setReferenceFrames = useCallback(
+    (referenceImages: RefImage[], endFrameImage?: RefImage) =>
+      setRefs({ referenceImages, endFrameImage }),
+    [setRefs],
+  );
   const setReferenceVideos = useCallback(
-    (v: RefVideo[]) => setRefs({ referenceVideos: v }),
+    (v: RefVideo[]) => {
+      referencePickerEpochRef.current++;
+      setRefs({ referenceVideos: v });
+    },
     [setRefs],
   );
   const setReferenceAudios = useCallback(
-    (v: RefAudio[]) => setRefs({ referenceAudios: v }),
+    (v: RefAudio[]) => {
+      referencePickerEpochRef.current++;
+      setRefs({ referenceAudios: v });
+    },
     [setRefs],
   );
   const [isImagePickerOpen, setIsImagePickerOpen] = useState(false);
@@ -490,6 +475,9 @@ export default function CreateVideo() {
   const maxVideoRefs = selectedModel?.video_references_max ?? 3;
   const maxVideoRefDuration =
     selectedModel?.video_references_max_total_duration_seconds ?? 30;
+  const maxAudioRefs = selectedModel?.audio_references_max ?? 2;
+  const maxAudioRefDurationTotal =
+    selectedModel?.audio_references_max_total_duration_seconds ?? 30;
   const supportsRefMode =
     !!selectedModel?.image_references_supported ||
     supportsVideoRefs ||
@@ -501,6 +489,41 @@ export default function CreateVideo() {
   );
   const needsImage =
     !!selectedModel?.starting_keyframe_required && referenceImages.length === 0;
+
+  const referencePickerMountedRef = useRef(true);
+  const referencePickerPolicy = {
+    modelId: selectedModel?.model,
+    isReferenceMode,
+    supportsImages: supportsImagePrompts,
+    supportsVideos: supportsVideoRefs,
+    supportsAudios: supportsAudioRefs,
+    maxImages: isReferenceMode ? (selectedModel?.image_references_max ?? 3) : 1,
+    maxVideos: maxVideoRefs,
+    maxVideoSeconds: maxVideoRefDuration,
+    maxAudios: maxAudioRefs,
+    maxAudioSeconds: maxAudioRefDurationTotal,
+    supportsEndFrame: hasEndFrame,
+  };
+  const referencePickerPolicyRef = useRef(referencePickerPolicy);
+  const referencePickerPolicySignature = JSON.stringify(referencePickerPolicy);
+  const renderedReferencePickerPolicyRef = useRef(
+    referencePickerPolicySignature,
+  );
+  if (
+    renderedReferencePickerPolicyRef.current !== referencePickerPolicySignature
+  ) {
+    referencePickerEpochRef.current++;
+  }
+  renderedReferencePickerPolicyRef.current = referencePickerPolicySignature;
+  referencePickerPolicyRef.current = referencePickerPolicy;
+
+  useEffect(() => {
+    referencePickerMountedRef.current = true;
+    return () => {
+      referencePickerMountedRef.current = false;
+      referencePickerEpochRef.current++;
+    };
+  }, []);
 
   // Effective duration: keep the user's chosen seconds when the model supports
   // them, else clamp/snap to this model's range for display + generation. The
@@ -847,8 +870,6 @@ export default function CreateVideo() {
   const pendingRefImages = useCreateVideoStore((s) => s.pendingRefImages);
   useEffect(() => {
     if (!pendingRefImages || apiModels.length === 0) return;
-    const incoming = useCreateVideoStore.getState().consumePendingRefImages();
-    if (!incoming || incoming.length === 0) return;
     const supportsRefs = !!selectedModel?.image_references_supported;
     const supportsKeyframe =
       !!selectedModel?.starting_keyframe_supported ||
@@ -858,10 +879,17 @@ export default function CreateVideo() {
       : supportsKeyframe
         ? 1
         : 0;
-    const result = mergeRefImages(referenceImages, incoming, maxImages);
+    const result = mergeRefImages(
+      useCreateVideoStore.getState().refs.referenceImages,
+      pendingRefImages,
+      maxImages,
+    );
     if (result.added > 0) {
       setReferenceImages(result.next);
       if (supportsRefs) setUi({ inputMode: "reference" });
+    }
+    if (useCreateVideoStore.getState().pendingRefImages === pendingRefImages) {
+      useCreateVideoStore.getState().setPendingRefImages(null);
     }
     toastMergeRefImagesOutcome(result, maxImages);
   }, [
@@ -879,33 +907,49 @@ export default function CreateVideo() {
   const pendingRefVideos = useCreateVideoStore((s) => s.pendingRefVideos);
   useEffect(() => {
     if (!pendingRefVideos || apiModels.length === 0) return;
-    const incoming = useCreateVideoStore.getState().consumePendingRefVideos();
-    if (!incoming || incoming.length === 0) return;
     if (!supportsVideoRefs) {
       toast.error(
         "The selected model doesn't support video references — pick one that does (e.g. Seedance)",
       );
+      if (
+        useCreateVideoStore.getState().pendingRefVideos === pendingRefVideos
+      ) {
+        useCreateVideoStore.getState().setPendingRefVideos(null);
+      }
       return;
     }
-    const existingTokens = new Set(referenceVideos.map((v) => v.mediaToken));
-    const fresh = incoming.filter((v) => !existingTokens.has(v.mediaToken));
+    let active = true;
     void (async () => {
-      const added = await buildVideoRefsToAdd(
-        fresh,
-        referenceVideos,
-        maxVideoRefs,
-        maxVideoRefDuration,
-      );
-      if (added.length > 0) {
-        setReferenceVideos([...referenceVideos, ...added]);
+      const result = await applyPendingVideoReferenceBatch(pendingRefVideos, {
+        isCurrent: () =>
+          active &&
+          useCreateVideoStore.getState().pendingRefVideos === pendingRefVideos,
+        getCurrent: () => useCreateVideoStore.getState().refs.referenceVideos,
+        publish: setReferenceVideos,
+        probeDuration: getVideoDurationFromUrl,
+        limits: {
+          maxCount: maxVideoRefs,
+          maxTotalSeconds: maxVideoRefDuration,
+        },
+        onUnreadable: () => toast.error("Could not read video file"),
+      });
+      if (result.status === "stale") return;
+      if (result.added > 0) {
         setUi({ inputMode: "reference" });
       }
+      if (
+        useCreateVideoStore.getState().pendingRefVideos === pendingRefVideos
+      ) {
+        useCreateVideoStore.getState().setPendingRefVideos(null);
+      }
     })();
+    return () => {
+      active = false;
+    };
   }, [
     pendingRefVideos,
     apiModels,
     supportsVideoRefs,
-    referenceVideos,
     maxVideoRefs,
     maxVideoRefDuration,
     setReferenceVideos,
@@ -1058,23 +1102,22 @@ export default function CreateVideo() {
 
   const handleLibraryImageSelect = useCallback(
     (items: GalleryItem[]) => {
-      const maxImages = isReferenceMode
-        ? (selectedModel?.image_references_max ?? 3)
-        : 1;
-      const availableSlots = Math.max(0, maxImages - referenceImages.length);
+      const policy = referencePickerPolicyRef.current;
+      if (!policy.supportsImages) return;
+      const current = useCreateVideoStore.getState().refs.referenceImages;
+      const availableSlots = Math.max(0, policy.maxImages - current.length);
       const newImages: RefImage[] = items
         .slice(0, availableSlots)
         .map((item) => ({
           id: Math.random().toString(36).substring(7),
           url: item.thumbnail || item.fullImage || "",
           fullUrl: item.fullImage || undefined,
-          file: new File([], "library-image"),
           mediaToken: item.id,
         }));
-      setReferenceImages([...referenceImages, ...newImages]);
+      setReferenceImages([...current, ...newImages]);
       setIsImagePickerOpen(false);
     },
-    [referenceImages, isReferenceMode, selectedModel],
+    [setReferenceImages],
   );
 
   const videoRefPickerMax = Math.max(1, maxVideoRefs - referenceVideos.length);
@@ -1095,31 +1138,74 @@ export default function CreateVideo() {
   const handleLibraryVideoSelect = useCallback(
     async (items: GalleryItem[]) => {
       setIsVideoRefPickerOpen(false);
+      const operationEpoch = referencePickerEpochRef.current;
+      const operationPolicy = referencePickerPolicyRef.current;
+      if (!operationPolicy.supportsVideos) return;
       const candidates: RefVideo[] = items
         .filter((item) => !!item.fullImage)
         .map((item) => ({
           id: Math.random().toString(36).substring(7),
           url: item.fullImage!,
-          file: new File([], "library-video"),
           mediaToken: item.id,
           duration: 0,
         }));
-      const added = await buildVideoRefsToAdd(
-        candidates,
-        referenceVideos,
-        maxVideoRefs,
-        maxVideoRefDuration,
-      );
-      if (added.length > 0) {
-        setReferenceVideos([...referenceVideos, ...added]);
+      let invalidDuration = false;
+      const result = await appendProbedMediaReferenceBatch(candidates, {
+        isCurrent: () => {
+          const policy = referencePickerPolicyRef.current;
+          return (
+            referencePickerMountedRef.current &&
+            operationEpoch === referencePickerEpochRef.current &&
+            policy.supportsVideos &&
+            policy.modelId === operationPolicy.modelId
+          );
+        },
+        getCurrent: () => useCreateVideoStore.getState().refs.referenceVideos,
+        // Publish through the atomic store primitive. The public callback bumps
+        // the epoch for user-driven clears/reorders, while this operation must
+        // remain current across its own multi-item settlement.
+        publish: (next) => setRefs({ referenceVideos: next }),
+        probeDuration: getVideoDurationFromUrl,
+        getLimits: () => ({
+          maxCount: referencePickerPolicyRef.current.maxVideos,
+          maxTotalSeconds: referencePickerPolicyRef.current.maxVideoSeconds,
+        }),
+        toReference: (candidate, duration) => ({
+          ...candidate,
+          duration,
+        }),
+        onRejected: (_candidate, status) => {
+          if (status === "invalid-duration") {
+            invalidDuration = true;
+            return;
+          }
+          if (status === "over-duration") {
+            const policy = referencePickerPolicyRef.current;
+            const remaining =
+              remainingMediaDurationSeconds(
+                useCreateVideoStore
+                  .getState()
+                  .refs.referenceVideos.map((reference) => reference.duration),
+                policy.maxVideoSeconds,
+              ) ?? 0;
+            toast.error(
+              `Video too long — max ${policy.maxVideoSeconds}s total (${formatMediaDurationSeconds(remaining)}s remaining)`,
+            );
+            return;
+          }
+          toast.error("Video reference limit reached");
+        },
+      });
+      if (
+        result.status === "complete" &&
+        (result.unreadable > 0 || invalidDuration)
+      ) {
+        toast.error("Could not read video file");
       }
     },
-    [referenceVideos, maxVideoRefs, maxVideoRefDuration, setReferenceVideos],
+    [setRefs],
   );
 
-  const maxAudioRefs = selectedModel?.audio_references_max ?? 2;
-  const maxAudioRefDurationTotal =
-    selectedModel?.audio_references_max_total_duration_seconds ?? 30;
   const audioRefPickerMax = Math.max(1, maxAudioRefs - referenceAudios.length);
 
   const handleAudioRefPickerSelect = useCallback(
@@ -1138,55 +1224,85 @@ export default function CreateVideo() {
   const handleLibraryAudioSelect = useCallback(
     async (items: GalleryItem[]) => {
       setIsAudioRefPickerOpen(false);
+      const operationEpoch = referencePickerEpochRef.current;
+      const operationPolicy = referencePickerPolicyRef.current;
+      if (!operationPolicy.supportsAudios) return;
       const candidates: RefAudio[] = items
         .filter((item) => Boolean(item.fullImage))
         .map((item) => ({
           id: Math.random().toString(36).substring(7),
           url: item.fullImage!,
-          file: new File([], "library-audio"),
           mediaToken: item.id,
           duration: 0,
         }));
-      const added = await buildProbedTimedRefsToAdd(
-        candidates,
-        referenceAudios,
-        maxAudioRefs,
-        maxAudioRefDurationTotal,
-        getAudioDurationFromUrl,
-        (rejection) => {
-          if (rejection.reason === "unreadable") {
-            toast.error("Could not read audio file");
-            return;
-          }
-          toast.error(
-            `Audio too long — max ${maxAudioRefDurationTotal}s total (${formatMediaDurationSeconds(rejection.remainingSeconds)}s remaining)`,
+      let invalidDuration = false;
+      const result = await appendProbedMediaReferenceBatch(candidates, {
+        isCurrent: () => {
+          const policy = referencePickerPolicyRef.current;
+          return (
+            referencePickerMountedRef.current &&
+            operationEpoch === referencePickerEpochRef.current &&
+            policy.supportsAudios &&
+            policy.modelId === operationPolicy.modelId
           );
         },
-      );
-      if (added.length > 0) {
-        setReferenceAudios([...referenceAudios, ...added]);
+        getCurrent: () => useCreateVideoStore.getState().refs.referenceAudios,
+        publish: (next) => setRefs({ referenceAudios: next }),
+        probeDuration: getAudioDurationFromUrl,
+        getLimits: () => ({
+          maxCount: referencePickerPolicyRef.current.maxAudios,
+          maxTotalSeconds: referencePickerPolicyRef.current.maxAudioSeconds,
+        }),
+        toReference: (candidate, duration) => ({
+          ...candidate,
+          duration,
+        }),
+        onRejected: (_candidate, status) => {
+          if (status === "invalid-duration") {
+            invalidDuration = true;
+            return;
+          }
+          if (status === "over-duration") {
+            const policy = referencePickerPolicyRef.current;
+            const remaining =
+              remainingMediaDurationSeconds(
+                useCreateVideoStore
+                  .getState()
+                  .refs.referenceAudios.map((reference) => reference.duration),
+                policy.maxAudioSeconds,
+              ) ?? 0;
+            toast.error(
+              `Audio too long — max ${policy.maxAudioSeconds}s total (${formatMediaDurationSeconds(remaining)}s remaining)`,
+            );
+            return;
+          }
+          toast.error("Audio reference limit reached");
+        },
+      });
+      if (
+        result.status === "complete" &&
+        (result.unreadable > 0 || invalidDuration)
+      ) {
+        toast.error("Could not read audio file");
       }
     },
-    [
-      referenceAudios,
-      maxAudioRefs,
-      maxAudioRefDurationTotal,
-      setReferenceAudios,
-    ],
+    [setRefs],
   );
 
-  const handleEndFrameLibrarySelect = useCallback((items: GalleryItem[]) => {
-    const item = items[0];
-    if (!item) return;
-    setEndFrameImage({
-      id: Math.random().toString(36).substring(7),
-      url: item.thumbnail || item.fullImage || "",
-      fullUrl: item.fullImage || undefined,
-      file: new File([], "library-image"),
-      mediaToken: item.id,
-    });
-    setIsEndFramePickerOpen(false);
-  }, []);
+  const handleEndFrameLibrarySelect = useCallback(
+    (items: GalleryItem[]) => {
+      const item = items[0];
+      if (!item || !referencePickerPolicyRef.current.supportsEndFrame) return;
+      setReferenceFrames(useCreateVideoStore.getState().refs.referenceImages, {
+        id: Math.random().toString(36).substring(7),
+        url: item.thumbnail || item.fullImage || "",
+        fullUrl: item.fullImage || undefined,
+        mediaToken: item.id,
+      });
+      setIsEndFramePickerOpen(false);
+    },
+    [setReferenceFrames],
+  );
 
   // Each picker only greys out tokens already in its own slot, so the same
   // media file can't be added twice to one field. Reusing an image across
@@ -1764,8 +1880,10 @@ export default function CreateVideo() {
             onReferenceImagesChange={setReferenceImages}
             isVideo
             isReferenceMode={isReferenceMode}
+            referenceOperationKey={`${selectedModel?.model ?? ""}:${isReferenceMode}`}
             endFrameImage={endFrameImage}
             onEndFrameImageChange={setEndFrameImage}
+            onReferenceFramesChange={setReferenceFrames}
             showEndFrameSection={hasEndFrame}
             onPickFromLibrary={
               supportsImagePrompts

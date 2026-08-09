@@ -2,6 +2,10 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { RecreatePayload } from "../../lib/recreate";
 import type { RefImage } from "../../components/prompt-box";
+import { reconcileOwnedMediaObjectUrls } from "@storyteller/common";
+
+const IMAGE_REFS_OWNER = Symbol("webapp-create-image-images");
+const IMAGE_PENDING_REFS_OWNER = Symbol("webapp-create-image-pending-images");
 
 export interface GeneratedImage {
   media_token: string;
@@ -43,7 +47,6 @@ type CreateImageState = {
   setPendingRecreate: (payload: RecreatePayload | null) => void;
   consumePendingRecreate: () => RecreatePayload | null;
   setPendingRefImages: (refs: RefImage[] | null) => void;
-  consumePendingRefImages: () => RefImage[] | null;
   startBatch: (
     prompt: string,
     requestedCount: number,
@@ -75,10 +78,13 @@ export const useCreateImageStore = create<CreateImageState>()(
       pendingRecreate: null,
       pendingRefImages: null,
 
-      setUi: (patch) =>
-        set((s) => ({ ui: { ...s.ui, ...patch } })),
+      setUi: (patch) => set((s) => ({ ui: { ...s.ui, ...patch } })),
 
-      setReferenceImages: (images) => set({ referenceImages: images }),
+      setReferenceImages: (images) =>
+        set((state) => {
+          reconcileImageUrls(IMAGE_REFS_OWNER, state.referenceImages, images);
+          return { referenceImages: images };
+        }),
 
       setPendingRecreate: (payload) => set({ pendingRecreate: payload }),
 
@@ -88,13 +94,15 @@ export const useCreateImageStore = create<CreateImageState>()(
         return payload;
       },
 
-      setPendingRefImages: (refs) => set({ pendingRefImages: refs }),
-
-      consumePendingRefImages: () => {
-        const refs = get().pendingRefImages;
-        if (refs) set({ pendingRefImages: null });
-        return refs;
-      },
+      setPendingRefImages: (refs) =>
+        set((state) => {
+          reconcileImageUrls(
+            IMAGE_PENDING_REFS_OWNER,
+            state.pendingRefImages ?? [],
+            refs ?? [],
+          );
+          return { pendingRefImages: refs };
+        }),
 
       startBatch: (prompt, requestedCount, modelLabel) => {
         const id = crypto.randomUUID();
@@ -123,7 +131,11 @@ export const useCreateImageStore = create<CreateImageState>()(
         set((s) => ({
           batches: s.batches.map((b) =>
             b.id === batchId
-              ? { ...b, status: "complete" as const, images: images.slice(0, 4) }
+              ? {
+                  ...b,
+                  status: "complete" as const,
+                  images: images.slice(0, 4),
+                }
               : b,
           ),
         }));
@@ -159,9 +171,22 @@ export const useCreateImageStore = create<CreateImageState>()(
       // uploaded images are base64 data URLs that can exceed the localStorage quota.
       partialize: (state) => ({ ui: state.ui }),
       merge: (persisted, current) => {
-        const persistedUi = (persisted as { ui?: Partial<ImageUiState> } | null)?.ui;
+        const persistedUi = (persisted as { ui?: Partial<ImageUiState> } | null)
+          ?.ui;
         return { ...current, ui: { ...current.ui, ...(persistedUi ?? {}) } };
       },
     },
   ),
 );
+
+function reconcileImageUrls(
+  owner: symbol,
+  previous: readonly RefImage[],
+  next: readonly RefImage[],
+): void {
+  reconcileOwnedMediaObjectUrls(
+    owner,
+    previous.map((reference) => reference.url),
+    next.map((reference) => reference.url),
+  );
+}

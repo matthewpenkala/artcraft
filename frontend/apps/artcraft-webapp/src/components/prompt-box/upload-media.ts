@@ -40,7 +40,8 @@ export const uploadVideo: UploadMediaFn = async ({
   } catch (err) {
     progressCallback({
       status: UploaderStates.imageCreateError,
-      errorMessage: err instanceof Error ? err.message : "Could not upload video",
+      errorMessage:
+        err instanceof Error ? err.message : "Could not upload video",
     });
   }
 };
@@ -73,21 +74,20 @@ export const uploadAudio: UploadMediaFn = async ({
   } catch (err) {
     progressCallback({
       status: UploaderStates.imageCreateError,
-      errorMessage: err instanceof Error ? err.message : "Could not upload audio",
+      errorMessage:
+        err instanceof Error ? err.message : "Could not upload audio",
     });
   }
 };
 
-// Resolves 0 when metadata can't be loaded.
-export const getVideoDurationFromUrl = (url: string): Promise<number> =>
-  probeMediaDurationFromUrl("video", url).then((duration) => duration ?? 0);
+export const getVideoDurationFromUrl = (url: string): Promise<number | null> =>
+  probeMediaDurationFromUrl("video", url);
 
-// Resolves 0 when metadata can't be loaded.
-export const getAudioDurationFromUrl = (url: string): Promise<number> =>
-  probeMediaDurationFromUrl("audio", url).then((duration) => duration ?? 0);
+export const getAudioDurationFromUrl = (url: string): Promise<number | null> =>
+  probeMediaDurationFromUrl("audio", url);
 
-export const getVideoDuration = (file: File): Promise<number> =>
-  probeMediaDurationFromFile("video", file).then((duration) => duration ?? 0);
+export const getVideoDuration = (file: File): Promise<number | null> =>
+  probeMediaDurationFromFile("video", file);
 
-export const getAudioDuration = (file: File): Promise<number> =>
-  probeMediaDurationFromFile("audio", file).then((duration) => duration ?? 0);
+export const getAudioDuration = (file: File): Promise<number | null> =>
+  probeMediaDurationFromFile("audio", file);

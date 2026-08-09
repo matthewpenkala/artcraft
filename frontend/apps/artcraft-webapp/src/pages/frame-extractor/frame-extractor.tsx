@@ -4,7 +4,12 @@ import { RotateCwIcon } from "lucide-react";
 import { Button } from "@storyteller/ui-button";
 import { GalleryItem, GalleryModal } from "@storyteller/ui-gallery-modal";
 import { MediaFilesApi } from "@storyteller/api";
-import { addCorsParam } from "@storyteller/common";
+import {
+  addCorsParam,
+  createOwnedMediaObjectUrl,
+  discardOwnedMediaObjectUrl,
+  reconcileOwnedMediaObjectUrls,
+} from "@storyteller/common";
 import Seo from "../../components/seo";
 import { toast } from "../../components/toast/toast";
 import { useSignupCta } from "../../components/signup-cta-modal";
@@ -66,22 +71,46 @@ export default function FrameExtractor() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const frameTokensRef = useRef<Map<string, FrameTokens>>(new Map());
-  // Frames handed off as prompt references keep their object URL alive — the
-  // reference deck on the create page renders it.
-  const handedOffUrlsRef = useRef<Set<string>>(new Set());
+  const framesRef = useRef<ExtractedFrame[]>([]);
+  const sourceRef = useRef<VideoSource | null>(null);
+  const framesOwnerRef = useRef(Symbol("frame-extractor-frames"));
+  const sourceOwnerRef = useRef(Symbol("frame-extractor-source"));
+  const mountedRef = useRef(true);
+  const sourceEpochRef = useRef(0);
+
+  const commitFrames = useCallback(
+    (update: (previous: ExtractedFrame[]) => ExtractedFrame[]) => {
+      const previous = framesRef.current;
+      const next = update(previous);
+      reconcileOwnedMediaObjectUrls(
+        framesOwnerRef.current,
+        previous.map((frame) => frame.objectUrl),
+        next.map((frame) => frame.objectUrl),
+      );
+      framesRef.current = next;
+      setFrames(next);
+    },
+    [],
+  );
+
+  const commitSource = useCallback((next: VideoSource | null) => {
+    const previous = sourceRef.current;
+    reconcileOwnedMediaObjectUrls(
+      sourceOwnerRef.current,
+      previous?.kind === "local" ? [previous.url] : [],
+      next?.kind === "local" ? [next.url] : [],
+    );
+    sourceRef.current = next;
+    setSource(next);
+  }, []);
 
   // ── Source loading ─────────────────────────────────────────────────────────
 
   const resetForNewSource = useCallback(() => {
+    sourceEpochRef.current++;
     abortRef.current?.abort();
-    setFrames((prev) => {
-      prev.forEach((frame) => {
-        if (!handedOffUrlsRef.current.has(frame.objectUrl)) {
-          URL.revokeObjectURL(frame.objectUrl);
-        }
-      });
-      return [];
-    });
+    abortRef.current = null;
+    commitFrames(() => []);
     setActionState({});
     frameTokensRef.current.clear();
     setCurrentTime(0);
@@ -89,7 +118,7 @@ export default function FrameExtractor() {
     setResolution(null);
     setProgress(null);
     setIsExtracting(false);
-  }, []);
+  }, [commitFrames]);
 
   const setLocalSource = useCallback(
     (files: FileList) => {
@@ -99,32 +128,27 @@ export default function FrameExtractor() {
         return;
       }
       resetForNewSource();
-      setSource((prev) => {
-        if (prev?.kind === "local") URL.revokeObjectURL(prev.url);
-        return { kind: "local", url: URL.createObjectURL(file) };
-      });
+      commitSource({ kind: "local", url: createOwnedMediaObjectUrl(file) });
     },
-    [resetForNewSource],
+    [commitSource, resetForNewSource],
   );
 
   const setLibrarySource = useCallback(
     (url: string, mediaToken: string) => {
       resetForNewSource();
-      setSource((prev) => {
-        if (prev?.kind === "local") URL.revokeObjectURL(prev.url);
-        return { kind: "library", url: addCorsParam(url) || url, mediaToken };
+      commitSource({
+        kind: "library",
+        url: addCorsParam(url) || url,
+        mediaToken,
       });
     },
-    [resetForNewSource],
+    [commitSource, resetForNewSource],
   );
 
   const clearSource = useCallback(() => {
     resetForNewSource();
-    setSource((prev) => {
-      if (prev?.kind === "local") URL.revokeObjectURL(prev.url);
-      return null;
-    });
-  }, [resetForNewSource]);
+    commitSource(null);
+  }, [commitSource, resetForNewSource]);
 
   // Deep link from the library: /frame-extractor?media=<token>. Consumed once
   // so switching videos later doesn't resurrect the param's source.
@@ -161,68 +185,81 @@ export default function FrameExtractor() {
   // Final cleanup: abort any in-flight burst and release blob URLs that no
   // other page is displaying.
   useEffect(() => {
+    // React StrictMode intentionally runs setup -> cleanup -> setup in
+    // development. Restore the live flag on every setup so the probe/capture
+    // completion guards do not discard valid results after that cycle.
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
+      sourceEpochRef.current++;
       abortRef.current?.abort();
-      setFrames((prev) => {
-        prev.forEach((frame) => {
-          if (!handedOffUrlsRef.current.has(frame.objectUrl)) {
-            URL.revokeObjectURL(frame.objectUrl);
-          }
-        });
-        return prev;
-      });
-      setSource((prev) => {
-        if (prev?.kind === "local") URL.revokeObjectURL(prev.url);
-        return prev;
-      });
+      reconcileOwnedMediaObjectUrls(
+        framesOwnerRef.current,
+        framesRef.current.map((frame) => frame.objectUrl),
+        [],
+      );
+      reconcileOwnedMediaObjectUrls(
+        sourceOwnerRef.current,
+        sourceRef.current?.kind === "local" ? [sourceRef.current.url] : [],
+        [],
+      );
+      framesRef.current = [];
+      sourceRef.current = null;
     };
   }, []);
 
   // ── Extraction ─────────────────────────────────────────────────────────────
 
-  const reportExtractionError = useCallback(
-    (error: unknown) => {
-      if (!(error instanceof FrameExtractionError)) {
-        toast.error("Failed to capture frame");
-        return;
-      }
-      switch (error.kind) {
-        case "aborted":
-          break;
-        case "cors":
-          toast.error(
-            "This video can't be captured due to cross-origin protection. Download it and upload the file directly.",
-          );
-          break;
-        case "timeout":
-          toast.error("The video didn't finish loading — try again.");
-          break;
-        default:
-          toast.error("Couldn't read this video. Try an MP4 (H.264) file.");
-      }
-    },
-    [],
-  );
+  const reportExtractionError = useCallback((error: unknown) => {
+    if (!(error instanceof FrameExtractionError)) {
+      toast.error("Failed to capture frame");
+      return;
+    }
+    switch (error.kind) {
+      case "aborted":
+        break;
+      case "cors":
+        toast.error(
+          "This video can't be captured due to cross-origin protection. Download it and upload the file directly.",
+        );
+        break;
+      case "timeout":
+        toast.error("The video didn't finish loading — try again.");
+        break;
+      default:
+        toast.error("Couldn't read this video. Try an MP4 (H.264) file.");
+    }
+  }, []);
 
   const handleCaptureCurrent = useCallback(async () => {
     const video = videoRef.current;
     if (!video || isExtracting) return;
+    const sourceEpoch = sourceEpochRef.current;
     setIsExtracting(true);
     try {
       const frame = await captureFrameAt(video, video.currentTime);
-      setFrames((prev) => [frame, ...prev]);
+      if (!mountedRef.current || sourceEpoch !== sourceEpochRef.current) {
+        discardOwnedMediaObjectUrl(frame.objectUrl);
+        return;
+      }
+      commitFrames((previous) => [frame, ...previous]);
     } catch (error) {
-      reportExtractionError(error);
+      if (mountedRef.current && sourceEpoch === sourceEpochRef.current) {
+        reportExtractionError(error);
+      }
     } finally {
-      setIsExtracting(false);
+      if (mountedRef.current && sourceEpoch === sourceEpochRef.current) {
+        setIsExtracting(false);
+      }
     }
-  }, [isExtracting, reportExtractionError]);
+  }, [commitFrames, isExtracting, reportExtractionError]);
 
   const handleExtractBurst = useCallback(async () => {
     const video = videoRef.current;
     if (!video || isExtracting) return;
 
     const abort = new AbortController();
+    const sourceEpoch = sourceEpochRef.current;
     abortRef.current = abort;
     setIsExtracting(true);
     setProgress({ done: 0, total: numFrames });
@@ -233,21 +270,37 @@ export default function FrameExtractor() {
         count: numFrames,
         spacingMs,
         signal: abort.signal,
-        onProgress: (done, total) => setProgress({ done, total }),
+        onProgress: (done, total) => {
+          if (mountedRef.current && sourceEpoch === sourceEpochRef.current) {
+            setProgress({ done, total });
+          }
+        },
       });
-      if (extracted.length === 0) {
+      if (
+        !mountedRef.current ||
+        sourceEpoch !== sourceEpochRef.current ||
+        abort.signal.aborted
+      ) {
+        extracted.forEach((frame) =>
+          discardOwnedMediaObjectUrl(frame.objectUrl),
+        );
+      } else if (extracted.length === 0) {
         toast.error("No frames could be captured before the video ended");
       } else {
-        setFrames((prev) => [...extracted.reverse(), ...prev]);
+        commitFrames((previous) => [...extracted.reverse(), ...previous]);
       }
     } catch (error) {
-      reportExtractionError(error);
+      if (mountedRef.current && sourceEpoch === sourceEpochRef.current) {
+        reportExtractionError(error);
+      }
     } finally {
-      setIsExtracting(false);
-      setProgress(null);
-      abortRef.current = null;
+      if (mountedRef.current && sourceEpoch === sourceEpochRef.current) {
+        setIsExtracting(false);
+        setProgress(null);
+      }
+      if (abortRef.current === abort) abortRef.current = null;
     }
-  }, [isExtracting, numFrames, spacingMs, reportExtractionError]);
+  }, [commitFrames, isExtracting, numFrames, spacingMs, reportExtractionError]);
 
   const handleCancelBurst = useCallback(() => {
     abortRef.current?.abort();
@@ -295,9 +348,15 @@ export default function FrameExtractor() {
       }
       patchFrameState(frame.id, { sending: true });
       const token = await tokenForReference(frame);
+      const frameIsLive =
+        mountedRef.current &&
+        framesRef.current.some(
+          (current) =>
+            current.id === frame.id && current.objectUrl === frame.objectUrl,
+        );
+      if (!frameIsLive) return;
       patchFrameState(frame.id, { sending: false });
       if (!token) return;
-      handedOffUrlsRef.current.add(frame.objectUrl);
       sendFrameToCreate(frame, token, destination, navigate);
     },
     [loggedIn, openSignupCta, patchFrameState, tokenForReference, navigate],
@@ -359,7 +418,9 @@ export default function FrameExtractor() {
     if (failures === 0) {
       toast.success("All frames saved to library");
     } else {
-      toast.error(`Failed to save ${failures} ${failures === 1 ? "frame" : "frames"}`);
+      toast.error(
+        `Failed to save ${failures} ${failures === 1 ? "frame" : "frames"}`,
+      );
     }
   }, [
     loggedIn,
@@ -371,31 +432,26 @@ export default function FrameExtractor() {
     saveFrameToLibrary,
   ]);
 
-  const handleRemove = useCallback((frame: ExtractedFrame) => {
-    setFrames((prev) => prev.filter((f) => f.id !== frame.id));
-    if (!handedOffUrlsRef.current.has(frame.objectUrl)) {
-      URL.revokeObjectURL(frame.objectUrl);
-    }
-    frameTokensRef.current.delete(frame.id);
-    setActionState((prev) => {
-      const next = { ...prev };
-      delete next[frame.id];
-      return next;
-    });
-  }, []);
+  const handleRemove = useCallback(
+    (frame: ExtractedFrame) => {
+      commitFrames((previous) =>
+        previous.filter((item) => item.id !== frame.id),
+      );
+      frameTokensRef.current.delete(frame.id);
+      setActionState((prev) => {
+        const next = { ...prev };
+        delete next[frame.id];
+        return next;
+      });
+    },
+    [commitFrames],
+  );
 
   const handleClear = useCallback(() => {
-    setFrames((prev) => {
-      prev.forEach((frame) => {
-        if (!handedOffUrlsRef.current.has(frame.objectUrl)) {
-          URL.revokeObjectURL(frame.objectUrl);
-        }
-      });
-      return [];
-    });
+    commitFrames(() => []);
     frameTokensRef.current.clear();
     setActionState({});
-  }, []);
+  }, [commitFrames]);
 
   // ── Library picker ─────────────────────────────────────────────────────────
 
@@ -407,12 +463,9 @@ export default function FrameExtractor() {
     setIsGalleryOpen(true);
   }, [loggedIn, openSignupCta]);
 
-  const handleGallerySelect = useCallback(
-    (id: string) => {
-      setGallerySelection((prev) => (prev.includes(id) ? [] : [id]));
-    },
-    [],
-  );
+  const handleGallerySelect = useCallback((id: string) => {
+    setGallerySelection((prev) => (prev.includes(id) ? [] : [id]));
+  }, []);
 
   const handleGalleryUse = useCallback(
     (selectedItems: GalleryItem[]) => {

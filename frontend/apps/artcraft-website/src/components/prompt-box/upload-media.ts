@@ -39,7 +39,8 @@ export const uploadVideo: UploadMediaFn = async ({
   } catch (err) {
     progressCallback({
       status: UploaderStates.imageCreateError,
-      errorMessage: err instanceof Error ? err.message : "Could not upload video",
+      errorMessage:
+        err instanceof Error ? err.message : "Could not upload video",
     });
   }
 };
@@ -72,13 +73,14 @@ export const uploadAudio: UploadMediaFn = async ({
   } catch (err) {
     progressCallback({
       status: UploaderStates.imageCreateError,
-      errorMessage: err instanceof Error ? err.message : "Could not upload audio",
+      errorMessage:
+        err instanceof Error ? err.message : "Could not upload audio",
     });
   }
 };
 
-export const getVideoDuration = (file: File): Promise<number> =>
-  probeMediaDurationFromFile("video", file).then((duration) => duration ?? 0);
+export const getVideoDuration = (file: File): Promise<number | null> =>
+  probeMediaDurationFromFile("video", file);
 
-export const getAudioDuration = (file: File): Promise<number> =>
-  probeMediaDurationFromFile("audio", file).then((duration) => duration ?? 0);
+export const getAudioDuration = (file: File): Promise<number | null> =>
+  probeMediaDurationFromFile("audio", file);

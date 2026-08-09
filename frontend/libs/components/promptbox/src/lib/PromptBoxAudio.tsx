@@ -1,15 +1,16 @@
-import { useMemo, useRef, useState, ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, ReactNode } from "react";
 import { toast } from "@storyteller/ui-toaster";
-import {
-  GalleryModal,
-  type GalleryItem,
-} from "@storyteller/ui-gallery-modal";
+import { GalleryModal, type GalleryItem } from "@storyteller/ui-gallery-modal";
 import { PopoverMenu, PopoverItem } from "@storyteller/ui-popover";
 import { Tooltip } from "@storyteller/ui-tooltip";
 import { GenerateButton, ToggleButton } from "@storyteller/ui-button";
 import { ChevronDownIcon, ChevronUpIcon, MicIcon, MicOffIcon, RepeatIcon } from "lucide-react";
 import { DynamicIcon } from "@storyteller/icons";
 import type { OmniGenAudioModelDetails, UploadMediaFn } from "@storyteller/api";
+import {
+  appendProbedMediaReferenceBatch,
+  probeMediaDurationFromUrl,
+} from "@storyteller/common";
 import {
   enqueueAudioGeneration,
   AUDIO_MODELS_REQUIRING_AUDIO_REF,
@@ -54,16 +55,6 @@ const AUDIO_REF_MAX_DURATION_SECONDS = 600;
 
 // Capability flags are serde-skipped when absent — only `true` counts.
 const supports = (flag: boolean | null | undefined): boolean => flag === true;
-
-// Resolves 0 when metadata can't be loaded.
-const getAudioDurationFromSrc = (src: string): Promise<number> =>
-  new Promise((resolve) => {
-    const audio = document.createElement("audio");
-    audio.preload = "metadata";
-    audio.onloadedmetadata = () => resolve(Math.round(audio.duration));
-    audio.onerror = () => resolve(0);
-    audio.src = src;
-  });
 
 interface PromptBoxAudioProps {
   // Audio models from GET /v1/omni_gen/models/audio (useOmniGenAudioModels).
@@ -123,6 +114,8 @@ export const PromptBoxAudio = ({
   >([]);
   const [isAudioLibraryProcessing, setIsAudioLibraryProcessing] =
     useState(false);
+  const audioLibraryEpochRef = useRef(0);
+  const mountedRef = useRef(true);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { isExpanded, toggleExpand } = useAutoGrowEditorHeight(
@@ -138,10 +131,13 @@ export const PromptBoxAudio = ({
       const chosen = models.find((m) => m.model === selectedModelId);
       if (chosen) return chosen;
     }
-    return (
-      models.find((m) => m.model === DEFAULT_AUDIO_MODEL_ID) ?? models[0]
-    );
+    return models.find((m) => m.model === DEFAULT_AUDIO_MODEL_ID) ?? models[0];
   }, [models, selectedModelId]);
+  const audioLibraryPolicyRef = useRef({
+    modelId: selectedModel?.model,
+    supported: false,
+    maxCount: 0,
+  });
 
   // Capability gating
   const styleSupported = supports(selectedModel?.style_prompt_supported);
@@ -170,6 +166,29 @@ export const PromptBoxAudio = ({
   );
   const missingRequiredAudioRef =
     requiresAudioRef && referenceAudios.length !== 1;
+  const audioLibraryPolicySignature = [
+    selectedModel?.model ?? "",
+    audioRefsSupported,
+    maxAudioRefs,
+  ].join("|");
+  const renderedAudioLibraryPolicyRef = useRef(audioLibraryPolicySignature);
+  if (renderedAudioLibraryPolicyRef.current !== audioLibraryPolicySignature) {
+    audioLibraryEpochRef.current++;
+  }
+  renderedAudioLibraryPolicyRef.current = audioLibraryPolicySignature;
+  audioLibraryPolicyRef.current = {
+    modelId: selectedModel?.model,
+    supported: audioRefsSupported,
+    maxCount: maxAudioRefs,
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      audioLibraryEpochRef.current++;
+    };
+  }, []);
 
   const effectiveSampleRate =
     sampleRateHz != null && sampleRateOptions?.includes(sampleRateHz)
@@ -200,6 +219,7 @@ export const PromptBoxAudio = ({
   // Seed Audio can't combine audio and image references — adding one kind
   // clears the other so the request is always valid.
   const handleReferenceAudiosChange = (audios: typeof referenceAudios) => {
+    audioLibraryEpochRef.current++;
     if (audios.length > 0 && referenceImages.length > 0) {
       setReferenceImages([]);
       toast.error("Removed image reference — it can't be combined with audio");
@@ -234,12 +254,20 @@ export const PromptBoxAudio = ({
   };
 
   const closeAudioLibrary = () => {
+    audioLibraryEpochRef.current++;
     setIsAudioLibraryOpen(false);
     setAudioLibrarySelectedIds([]);
   };
 
   const handleAudioLibraryUseSelected = async (items: GalleryItem[]) => {
-    const availableSlots = Math.max(0, maxAudioRefs - referenceAudios.length);
+    const operationEpoch = audioLibraryEpochRef.current;
+    const operationPolicy = audioLibraryPolicyRef.current;
+    if (!operationPolicy.supported) return;
+    const currentAudios = usePromptAudioStore.getState().referenceAudios;
+    const availableSlots = Math.max(
+      0,
+      operationPolicy.maxCount - currentAudios.length,
+    );
     const picked = items
       .slice(0, availableSlots)
       .filter((item): item is GalleryItem & { fullImage: string } =>
@@ -248,49 +276,66 @@ export const PromptBoxAudio = ({
 
     setIsAudioLibraryProcessing(true);
     try {
-      // Use the duration the list endpoint already knows; probe the file's
-      // metadata only when it doesn't.
-      const durations = await Promise.all(
-        picked.map((item) =>
-          item.durationMillis != null
-            ? Promise.resolve(Math.round(item.durationMillis / 1000))
-            : getAudioDurationFromSrc(item.fullImage),
-        ),
-      );
-
-      const added: RefAudio[] = [];
-      let total = referenceAudios.reduce((sum, a) => sum + a.duration, 0);
-      for (let i = 0; i < picked.length; i++) {
-        const item = picked[i]!;
-        const duration = durations[i]!;
-        if (total + duration > AUDIO_REF_MAX_DURATION_SECONDS) {
-          toast.error(
-            `Total audio duration cannot exceed ${AUDIO_REF_MAX_DURATION_SECONDS}s`,
+      await appendProbedMediaReferenceBatch(picked, {
+        isCurrent: () => {
+          const currentPolicy = audioLibraryPolicyRef.current;
+          return (
+            mountedRef.current &&
+            operationEpoch === audioLibraryEpochRef.current &&
+            currentPolicy.supported &&
+            currentPolicy.modelId === operationPolicy.modelId
           );
-          break;
-        }
-        total += duration;
-        added.push({
+        },
+        getCurrent: () => usePromptAudioStore.getState().referenceAudios,
+        publish: (next) => {
+          const store = usePromptAudioStore.getState();
+          if (store.referenceImages.length > 0) {
+            store.setReferenceImages([]);
+            toast.error(
+              "Removed image reference — it can't be combined with audio",
+            );
+          }
+          store.setReferenceAudios(next);
+        },
+        probeDuration: (url) => probeMediaDurationFromUrl("audio", url),
+        getLimits: () => ({
+          maxCount: audioLibraryPolicyRef.current.maxCount,
+          maxTotalSeconds: AUDIO_REF_MAX_DURATION_SECONDS,
+        }),
+        toReference: (item, duration) => ({
           id: Math.random().toString(36).substring(7),
           url: item.fullImage,
-          file: new File([], "library-audio"),
           mediaToken: item.id,
           duration,
-        });
-      }
-      if (added.length > 0) {
-        handleReferenceAudiosChange([...referenceAudios, ...added]);
-      }
+        }),
+        onUnreadable: () => toast.error("Could not read audio duration"),
+        onRejected: (_item, status) =>
+          toast.error(
+            status === "invalid-duration"
+              ? "Could not verify audio duration"
+              : status === "over-count"
+                ? `Maximum ${audioLibraryPolicyRef.current.maxCount} audio references`
+                : `Total audio duration cannot exceed ${AUDIO_REF_MAX_DURATION_SECONDS}s`,
+          ),
+      });
     } finally {
-      setIsAudioLibraryProcessing(false);
+      if (mountedRef.current) setIsAudioLibraryProcessing(false);
     }
-    closeAudioLibrary();
+    if (mountedRef.current && operationEpoch === audioLibraryEpochRef.current) {
+      setIsAudioLibraryOpen(false);
+      setAudioLibrarySelectedIds([]);
+    }
   };
 
   const handleReferenceImagesChange = (images: typeof referenceImages) => {
+    // Any explicit image edit supersedes a still-pending library audio batch,
+    // including the empty -> non-empty case where there is no audio to clear.
+    audioLibraryEpochRef.current++;
     if (images.length > 0 && referenceAudios.length > 0) {
       setReferenceAudios([]);
-      toast.error("Removed audio reference — it can't be combined with an image");
+      toast.error(
+        "Removed audio reference — it can't be combined with an image",
+      );
     }
     setReferenceImages(images);
   };
@@ -350,6 +395,7 @@ export const PromptBoxAudio = ({
     prompt.length > 0 || stylePrompt.length > 0 || hasAttachedRefs;
 
   const handleClearAll = () => {
+    audioLibraryEpochRef.current++;
     setPrompt("");
     setStylePrompt("");
     setReferenceAudios([]);

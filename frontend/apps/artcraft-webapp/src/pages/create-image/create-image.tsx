@@ -358,10 +358,15 @@ export default function CreateImage() {
   const pendingRefImages = useCreateImageStore((s) => s.pendingRefImages);
   useEffect(() => {
     if (!pendingRefImages || apiModels.length === 0) return;
-    const incoming = useCreateImageStore.getState().consumePendingRefImages();
-    if (!incoming || incoming.length === 0) return;
-    const result = mergeRefImages(referenceImages, incoming, maxImageRefs);
+    const result = mergeRefImages(
+      useCreateImageStore.getState().referenceImages,
+      pendingRefImages,
+      maxImageRefs,
+    );
     if (result.added > 0) setReferenceImages(result.next);
+    if (useCreateImageStore.getState().pendingRefImages === pendingRefImages) {
+      useCreateImageStore.getState().setPendingRefImages(null);
+    }
     toastMergeRefImagesOutcome(result, maxImageRefs);
   }, [
     pendingRefImages,

@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { RefAudio, RefImage } from "../../components/prompt-box";
+import { reconcileOwnedMediaObjectUrls } from "@storyteller/common";
+
+const AUDIO_REFS_OWNER = Symbol("webapp-create-audio-audios");
+const AUDIO_IMAGES_OWNER = Symbol("webapp-create-audio-images");
 
 export type AudioUiState = {
   selectedModelId: string | null;
@@ -55,9 +59,25 @@ export const useCreateAudioStore = create<CreateAudioState>()(
 
       setUi: (patch) => set((s) => ({ ui: { ...s.ui, ...patch } })),
 
-      setReferenceAudios: (audios) => set({ referenceAudios: audios }),
+      setReferenceAudios: (audios) =>
+        set((state) => {
+          reconcileOwnedMediaObjectUrls(
+            AUDIO_REFS_OWNER,
+            state.referenceAudios.map((reference) => reference.url),
+            audios.map((reference) => reference.url),
+          );
+          return { referenceAudios: audios };
+        }),
 
-      setReferenceImages: (images) => set({ referenceImages: images }),
+      setReferenceImages: (images) =>
+        set((state) => {
+          reconcileOwnedMediaObjectUrls(
+            AUDIO_IMAGES_OWNER,
+            state.referenceImages.map((reference) => reference.url),
+            images.map((reference) => reference.url),
+          );
+          return { referenceImages: images };
+        }),
 
       reset: () => set({ ui: { ...DEFAULT_UI } }),
     }),

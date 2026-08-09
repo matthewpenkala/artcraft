@@ -1,3 +1,5 @@
+import { withTemporaryMediaObjectUrl } from "./media-object-url";
+
 const MILLISECONDS_PER_SECOND = 1_000;
 
 export const MEDIA_DURATION_PROBE_TIMEOUT_MS = 10_000;
@@ -204,10 +206,9 @@ export function probeMediaDurationFromFile(
   file: File,
   timeoutMs = MEDIA_DURATION_PROBE_TIMEOUT_MS,
 ): Promise<number | null> {
-  const url = URL.createObjectURL(file);
-  return probeMediaDurationFromUrl(kind, url, timeoutMs).finally(() => {
-    URL.revokeObjectURL(url);
-  });
+  return withTemporaryMediaObjectUrl(file, (url) =>
+    probeMediaDurationFromUrl(kind, url, timeoutMs),
+  );
 }
 
 /** Compact display only; validation must use the integer-millisecond helpers. */

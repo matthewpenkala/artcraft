@@ -22,12 +22,9 @@ const promptBox = readFileSync(
 
 describe("website reference duration display consumers", () => {
   it("formats exact group totals without raw interpolation", () => {
-    expect(promptBox).toContain(
-      "formatMediaDurationSeconds(totalVideoRefSeconds)",
-    );
-    expect(promptBox).toContain(
-      "formatMediaDurationSeconds(totalAudioRefSeconds)",
-    );
+    expect(promptBox).toContain("formatMediaDurationSeconds(");
+    expect(promptBox).toContain("totalVideoRefDisplay");
+    expect(promptBox).toContain("totalAudioRefDisplay");
     expect(promptBox).not.toMatch(/\$\{total(?:Video|Audio)RefSeconds\}/);
   });
 });

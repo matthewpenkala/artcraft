@@ -1,11 +1,18 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { RecreatePayload } from "../../lib/recreate";
-import type {
-  RefImage,
-  RefVideo,
-  RefAudio,
-} from "../../components/prompt-box";
+import type { RefImage, RefVideo, RefAudio } from "../../components/prompt-box";
+import {
+  reconcileOwnedMediaObjectUrlOwners,
+  reconcileOwnedMediaObjectUrls,
+} from "@storyteller/common";
+
+const VIDEO_IMAGES_OWNER = Symbol("webapp-create-video-images");
+const VIDEO_END_IMAGE_OWNER = Symbol("webapp-create-video-end-image");
+const VIDEO_VIDEOS_OWNER = Symbol("webapp-create-video-videos");
+const VIDEO_AUDIOS_OWNER = Symbol("webapp-create-video-audios");
+const VIDEO_PENDING_IMAGES_OWNER = Symbol("webapp-create-video-pending-images");
+const VIDEO_PENDING_VIDEOS_OWNER = Symbol("webapp-create-video-pending-videos");
 
 export interface GeneratedVideo {
   media_token: string;
@@ -60,10 +67,12 @@ type CreateVideoState = {
   setPendingRecreate: (payload: RecreatePayload | null) => void;
   consumePendingRecreate: () => RecreatePayload | null;
   setPendingRefImages: (refs: RefImage[] | null) => void;
-  consumePendingRefImages: () => RefImage[] | null;
   setPendingRefVideos: (refs: RefVideo[] | null) => void;
-  consumePendingRefVideos: () => RefVideo[] | null;
-  startBatch: (prompt: string, modelLabel: string, batchCount?: number) => string;
+  startBatch: (
+    prompt: string,
+    modelLabel: string,
+    batchCount?: number,
+  ) => string;
   setBatchJobToken: (batchId: string, jobToken: string) => void;
   completeBatch: (batchId: string, video: GeneratedVideo) => void;
   failBatch: (batchId: string, reason?: string) => void;
@@ -101,11 +110,14 @@ export const useCreateVideoStore = create<CreateVideoState>()(
       pendingRefImages: null,
       pendingRefVideos: null,
 
-      setUi: (patch) =>
-        set((s) => ({ ui: { ...s.ui, ...patch } })),
+      setUi: (patch) => set((s) => ({ ui: { ...s.ui, ...patch } })),
 
       setRefs: (patch) =>
-        set((s) => ({ refs: { ...s.refs, ...patch } })),
+        set((state) => {
+          const next = { ...state.refs, ...patch };
+          reconcileVideoRefUrls(state.refs, next);
+          return { refs: next };
+        }),
 
       setPendingRecreate: (payload) => set({ pendingRecreate: payload }),
 
@@ -115,21 +127,25 @@ export const useCreateVideoStore = create<CreateVideoState>()(
         return payload;
       },
 
-      setPendingRefImages: (refs) => set({ pendingRefImages: refs }),
+      setPendingRefImages: (refs) =>
+        set((state) => {
+          reconcileOwnedMediaObjectUrls(
+            VIDEO_PENDING_IMAGES_OWNER,
+            (state.pendingRefImages ?? []).map((reference) => reference.url),
+            (refs ?? []).map((reference) => reference.url),
+          );
+          return { pendingRefImages: refs };
+        }),
 
-      consumePendingRefImages: () => {
-        const refs = get().pendingRefImages;
-        if (refs) set({ pendingRefImages: null });
-        return refs;
-      },
-
-      setPendingRefVideos: (refs) => set({ pendingRefVideos: refs }),
-
-      consumePendingRefVideos: () => {
-        const refs = get().pendingRefVideos;
-        if (refs) set({ pendingRefVideos: null });
-        return refs;
-      },
+      setPendingRefVideos: (refs) =>
+        set((state) => {
+          reconcileOwnedMediaObjectUrls(
+            VIDEO_PENDING_VIDEOS_OWNER,
+            (state.pendingRefVideos ?? []).map((reference) => reference.url),
+            (refs ?? []).map((reference) => reference.url),
+          );
+          return { pendingRefVideos: refs };
+        }),
 
       startBatch: (prompt, modelLabel, batchCount) => {
         const id = crypto.randomUUID();
@@ -156,9 +172,7 @@ export const useCreateVideoStore = create<CreateVideoState>()(
       completeBatch: (batchId, video) => {
         set((s) => ({
           batches: s.batches.map((b) =>
-            b.id === batchId
-              ? { ...b, status: "complete" as const, video }
-              : b,
+            b.id === batchId ? { ...b, status: "complete" as const, video } : b,
           ),
         }));
       },
@@ -232,3 +246,31 @@ export const useCreateVideoStore = create<CreateVideoState>()(
     },
   ),
 );
+
+function reconcileVideoRefUrls(
+  previous: VideoRefsState,
+  next: VideoRefsState,
+): void {
+  reconcileOwnedMediaObjectUrlOwners([
+    {
+      owner: VIDEO_IMAGES_OWNER,
+      previousUrls: previous.referenceImages.map((reference) => reference.url),
+      nextUrls: next.referenceImages.map((reference) => reference.url),
+    },
+    {
+      owner: VIDEO_END_IMAGE_OWNER,
+      previousUrls: previous.endFrameImage ? [previous.endFrameImage.url] : [],
+      nextUrls: next.endFrameImage ? [next.endFrameImage.url] : [],
+    },
+    {
+      owner: VIDEO_VIDEOS_OWNER,
+      previousUrls: previous.referenceVideos.map((reference) => reference.url),
+      nextUrls: next.referenceVideos.map((reference) => reference.url),
+    },
+    {
+      owner: VIDEO_AUDIOS_OWNER,
+      previousUrls: previous.referenceAudios.map((reference) => reference.url),
+      nextUrls: next.referenceAudios.map((reference) => reference.url),
+    },
+  ]);
+}

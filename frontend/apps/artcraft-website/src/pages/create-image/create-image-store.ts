@@ -1,6 +1,9 @@
 import { create } from "zustand";
 import type { RecreatePayload } from "../../lib/recreate";
 import type { RefImage } from "../../components/prompt-box";
+import { reconcileOwnedMediaObjectUrls } from "@storyteller/common";
+
+const IMAGE_REFS_OWNER = Symbol("website-create-image-images");
 
 export interface GeneratedImage {
   media_token: string;
@@ -66,10 +69,17 @@ export const useCreateImageStore = create<CreateImageState>((set, get) => ({
   referenceImages: [],
   pendingRecreate: null,
 
-  setUi: (patch) =>
-    set((s) => ({ ui: { ...s.ui, ...patch } })),
+  setUi: (patch) => set((s) => ({ ui: { ...s.ui, ...patch } })),
 
-  setReferenceImages: (images) => set({ referenceImages: images }),
+  setReferenceImages: (images) =>
+    set((state) => {
+      reconcileOwnedMediaObjectUrls(
+        IMAGE_REFS_OWNER,
+        state.referenceImages.map((reference) => reference.url),
+        images.map((reference) => reference.url),
+      );
+      return { referenceImages: images };
+    }),
 
   setPendingRecreate: (payload) => set({ pendingRecreate: payload }),
 

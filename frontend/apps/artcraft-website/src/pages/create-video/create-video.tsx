@@ -160,6 +160,11 @@ export default function CreateVideo() {
     (v?: RefImage) => setRefs({ endFrameImage: v }),
     [setRefs],
   );
+  const setReferenceFrames = useCallback(
+    (referenceImages: RefImage[], endFrameImage?: RefImage) =>
+      setRefs({ referenceImages, endFrameImage }),
+    [setRefs],
+  );
   const setReferenceVideos = useCallback(
     (v: RefVideo[]) => setRefs({ referenceVideos: v }),
     [setRefs],
@@ -791,7 +796,11 @@ export default function CreateVideo() {
     setIsGenerating(true);
 
     const modelLabel = selectedModel.full_name ?? selectedModel.model;
-    const batchId = startBatch(prompt, modelLabel, numVideos > 1 ? numVideos : undefined);
+    const batchId = startBatch(
+      prompt,
+      modelLabel,
+      numVideos > 1 ? numVideos : undefined,
+    );
 
     try {
       console.log("[generate-video] enqueueing job...");
@@ -945,8 +954,10 @@ export default function CreateVideo() {
             onReferenceImagesChange={setReferenceImages}
             isVideo
             isReferenceMode={isReferenceMode}
+            referenceOperationKey={`${selectedModel?.model ?? ""}:${isReferenceMode}`}
             endFrameImage={endFrameImage}
             onEndFrameImageChange={setEndFrameImage}
+            onReferenceFramesChange={setReferenceFrames}
             showEndFrameSection={hasEndFrame}
             onPickFromLibrary={
               supportsImagePrompts
@@ -971,7 +982,9 @@ export default function CreateVideo() {
                   showIconsInList
                   triggerIcon={
                     <img
-                      src={getCreatorIconPathForModelId(selectedModel?.model ?? "")}
+                      src={getCreatorIconPathForModelId(
+                        selectedModel?.model ?? "",
+                      )}
                       alt=""
                       className="h-4 w-4 icon-auto-contrast"
                     />

@@ -263,6 +263,7 @@ export const PromptBoxVideo = ({
   const setReferenceImages = usePromptVideoStore((s) => s.setReferenceImages);
   const storedEndFrameImage = usePromptVideoStore((s) => s.endFrameImage);
   const setEndFrameImage = usePromptVideoStore((s) => s.setEndFrameImage);
+  const setReferenceFrames = usePromptVideoStore((s) => s.setReferenceFrames);
   const storedReferenceVideos = usePromptVideoStore((s) => s.referenceVideos);
   const setReferenceVideos = usePromptVideoStore((s) => s.setReferenceVideos);
   const storedReferenceAudios = usePromptVideoStore((s) => s.referenceAudios);
@@ -627,6 +628,7 @@ export const PromptBoxVideo = ({
     maxImages: maxImageCount,
     endFrameImage,
     setEndFrameImage,
+    endFrameEnabled: !isReferenceMode && referenceProjection.acceptsEndFrame,
     referenceVideos,
     setReferenceVideos: referenceProjection.acceptsVideos
       ? setReferenceVideos
@@ -639,6 +641,7 @@ export const PromptBoxVideo = ({
       : undefined,
     maxAudios: maxAudioCount,
     maxAudioTotalSec: referenceCapabilities.maxAudioRefDuration,
+    operationKey: `${selectedModel?.model ?? ""}:${isReferenceMode}`,
     uploadImage,
     uploadVideo,
     uploadAudio,
@@ -819,15 +822,7 @@ export const PromptBoxVideo = ({
     );
   }
 
-  const handleRemoveDeckItem = (id: string) => {
-    if (referenceImages.some((img) => img.id === id)) {
-      setReferenceImages(referenceImages.filter((img) => img.id !== id));
-    } else if (referenceVideos.some((video) => video.id === id)) {
-      setReferenceVideos(referenceVideos.filter((video) => video.id !== id));
-    } else if (referenceAudios.some((audio) => audio.id === id)) {
-      setReferenceAudios(referenceAudios.filter((audio) => audio.id !== id));
-    }
-  };
+  const handleRemoveDeckItem = deck.removeReference;
 
   const displayCountLimit = (limit: number | null) =>
     limit === null ? "∞" : String(limit);
@@ -847,14 +842,14 @@ export const PromptBoxVideo = ({
       addMenuGroupHints={refDeckGroupHints}
       onAddClick={deck.openAnyUpload}
       onRemove={handleRemoveDeckItem}
-      onReorderImages={(from, to) =>
-        setReferenceImages(arrayMove(referenceImages, from, to))
+      onReorderImages={deck.reorderImages}
+      onClearAll={() =>
+        deck.clearReferences(() => {
+          setReferenceFrames([], undefined);
+          setReferenceVideos([]);
+          setReferenceAudios([]);
+        })
       }
-      onClearAll={() => {
-        setReferenceImages([]);
-        setReferenceVideos([]);
-        setReferenceAudios([]);
-      }}
       alwaysExpanded={alwaysExpanded}
     />
   );
@@ -896,8 +891,7 @@ export const PromptBoxVideo = ({
   const handleSwapFrames = () => {
     const first = referenceImages[0];
     if (!first || !endFrameImage) return;
-    setReferenceImages([endFrameImage]);
-    setEndFrameImage(first);
+    setReferenceFrames([endFrameImage], first);
   };
 
   const renderKeyframeCards = () => (
@@ -933,7 +927,7 @@ export const PromptBoxVideo = ({
           onSelect: () => deck.openGallery("end"),
         },
       ]}
-      onRemoveFirst={() => setReferenceImages([])}
+      onRemoveFirst={() => deck.replaceImages([])}
       onRemoveLast={() => setEndFrameImage(undefined)}
       onSwap={handleSwapFrames}
     />
@@ -1163,10 +1157,11 @@ export const PromptBoxVideo = ({
 
   const handleClearAll = () => {
     setPrompt("");
-    setReferenceImages([]);
-    setEndFrameImage(undefined);
-    setReferenceVideos([]);
-    setReferenceAudios([]);
+    deck.clearReferences(() => {
+      setReferenceFrames([], undefined);
+      setReferenceVideos([]);
+      setReferenceAudios([]);
+    });
   };
 
   const maxLen =

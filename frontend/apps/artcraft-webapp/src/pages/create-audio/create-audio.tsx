@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FilterMediaClasses } from "@storyteller/api";
 import type { OmniGenAudioModelDetails } from "@storyteller/api";
 import { PopoverMenu, type PopoverItem } from "@storyteller/ui-popover";
@@ -66,6 +66,7 @@ import { toast } from "../../components/toast/toast";
 import { useSignupCta } from "../../components/signup-cta-modal";
 import { useInsufficientCredits } from "../../components/insufficient-credits-modal";
 import { MicIcon, MicOffIcon, RepeatIcon, SparklesIcon } from "lucide-react";
+import { applyAudioLibraryReferenceBatch } from "./audio-library-reference-coordinator";
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -188,6 +189,30 @@ export default function CreateAudio() {
   >([]);
   const [isBeatDrawerOpen, setIsBeatDrawerOpen] = useState(false);
   const [isTuningDrawerOpen, setIsTuningDrawerOpen] = useState(false);
+  const audioLibraryEpochRef = useRef(0);
+  const audioLibraryMountedRef = useRef(true);
+  const audioLibraryPolicy = {
+    modelId: selectedModel?.model,
+    supported: audioRefsSupported,
+    maxCount: maxAudioRefs,
+    maxTotalSeconds: AUDIO_REF_MAX_DURATION_SECONDS,
+  };
+  const audioLibraryPolicyRef = useRef(audioLibraryPolicy);
+  const audioLibraryPolicySignature = JSON.stringify(audioLibraryPolicy);
+  const renderedAudioLibraryPolicyRef = useRef(audioLibraryPolicySignature);
+  if (renderedAudioLibraryPolicyRef.current !== audioLibraryPolicySignature) {
+    audioLibraryEpochRef.current++;
+  }
+  renderedAudioLibraryPolicyRef.current = audioLibraryPolicySignature;
+  audioLibraryPolicyRef.current = audioLibraryPolicy;
+
+  useEffect(() => {
+    audioLibraryMountedRef.current = true;
+    return () => {
+      audioLibraryMountedRef.current = false;
+      audioLibraryEpochRef.current++;
+    };
+  }, []);
 
   useEffect(() => {
     if (isImagePickerOpen) setPickerSelectedIds([]);
@@ -275,6 +300,7 @@ export default function CreateAudio() {
   // clears the other so the request is always valid.
   const handleReferenceAudiosChange = useCallback(
     (audios: typeof referenceAudios) => {
+      audioLibraryEpochRef.current++;
       if (audios.length > 0 && referenceImages.length > 0) {
         setReferenceImages([]);
         toast.error(
@@ -288,6 +314,7 @@ export default function CreateAudio() {
 
   const handleReferenceImagesChange = useCallback(
     (images: RefImage[]) => {
+      audioLibraryEpochRef.current++;
       if (images.length > 0 && referenceAudios.length > 0) {
         setReferenceAudios([]);
         toast.error(
@@ -317,42 +344,55 @@ export default function CreateAudio() {
   const handleLibraryAudioSelect = useCallback(
     async (items: GalleryItem[]) => {
       setIsAudioPickerOpen(false);
-      const availableSlots = Math.max(0, maxAudioRefs - referenceAudios.length);
-      const picked = items.slice(0, availableSlots);
+      const operationEpoch = audioLibraryEpochRef.current;
+      const operationPolicy = audioLibraryPolicyRef.current;
+      if (!operationPolicy.supported) return;
 
-      const added: RefAudio[] = [];
-      let total = referenceAudios.reduce((sum, a) => sum + a.duration, 0);
-      for (const item of picked) {
-        const url = item.fullImage;
-        if (!url) continue;
-        const duration =
-          item.durationMillis != null
-            ? Math.round(item.durationMillis / 1000)
-            : await getAudioDurationFromUrl(url);
-        if (duration <= 0) {
-          toast.error("Could not read audio file");
-          continue;
-        }
-        if (total + duration > AUDIO_REF_MAX_DURATION_SECONDS) {
-          toast.error(
-            `Total audio duration cannot exceed ${AUDIO_REF_MAX_DURATION_SECONDS}s`,
-          );
-          continue;
-        }
-        total += duration;
-        added.push({
+      const candidates = items
+        .filter((item): item is GalleryItem & { fullImage: string } =>
+          Boolean(item.fullImage),
+        )
+        .map((item) => ({
           id: Math.random().toString(36).substring(7),
-          url,
-          file: new File([], "library-audio"),
+          url: item.fullImage,
           mediaToken: item.id,
+        }));
+      await applyAudioLibraryReferenceBatch(candidates, {
+        operationEpoch,
+        operationModelId: operationPolicy.modelId,
+        isMounted: () => audioLibraryMountedRef.current,
+        getEpoch: () => audioLibraryEpochRef.current,
+        getPolicy: () => audioLibraryPolicyRef.current,
+        getCurrent: () => useCreateAudioStore.getState().referenceAudios,
+        publish: (next) => {
+          const current = useCreateAudioStore.getState();
+          if (current.referenceImages.length > 0) {
+            setReferenceImages([]);
+            toast.error(
+              "Removed image reference — it can't be combined with audio",
+            );
+          }
+          setReferenceAudios(next);
+        },
+        // Gallery metadata is advisory. Probe the current URL so state, caps,
+        // the eventual request, and billing all describe the same media.
+        probeDuration: getAudioDurationFromUrl,
+        toReference: (candidate, duration): RefAudio => ({
+          ...candidate,
           duration,
-        });
-      }
-      if (added.length > 0) {
-        handleReferenceAudiosChange([...referenceAudios, ...added]);
-      }
+        }),
+        onUnreadable: () => toast.error("Could not read audio file"),
+        onRejected: (_candidate, status) => {
+          const policy = audioLibraryPolicyRef.current;
+          toast.error(
+            status === "over-count"
+              ? `Maximum ${policy.maxCount} audio references`
+              : `Total audio duration cannot exceed ${policy.maxTotalSeconds}s`,
+          );
+        },
+      });
     },
-    [referenceAudios, maxAudioRefs, handleReferenceAudiosChange],
+    [setReferenceAudios, setReferenceImages],
   );
 
   const handleLibraryImageSelect = useCallback(
@@ -363,7 +403,6 @@ export default function CreateAudio() {
           id: Math.random().toString(36).substring(7),
           url: item.thumbnail || item.fullImage || "",
           fullUrl: item.fullImage || undefined,
-          file: new File([], "library-image"),
           mediaToken: item.id,
         }));
       handleReferenceImagesChange(newImages);
@@ -575,6 +614,7 @@ export default function CreateAudio() {
       maxAudioCount={maxAudioRefs}
       maxAudioRefDuration={AUDIO_REF_MAX_DURATION_SECONDS}
       onPickAudioFromLibrary={() => setIsAudioPickerOpen(true)}
+      externalOperationKey={referenceImages}
     />
   ) : undefined;
 

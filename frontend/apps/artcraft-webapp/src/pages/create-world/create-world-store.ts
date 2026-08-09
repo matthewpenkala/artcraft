@@ -2,6 +2,10 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { RecreatePayload } from "../../lib/recreate";
 import type { RefImage, RefVideo } from "../../components/prompt-box";
+import { reconcileOwnedMediaObjectUrls } from "@storyteller/common";
+
+const WORLD_IMAGES_OWNER = Symbol("webapp-create-world-images");
+const WORLD_VIDEOS_OWNER = Symbol("webapp-create-world-videos");
 
 // A generated splat (3D world). `cdn_url` here is the .spz file.
 export interface GeneratedAsset {
@@ -67,9 +71,25 @@ export const useCreateWorldStore = create<CreateWorldState>()(
 
       setUi: (patch) => set((s) => ({ ui: { ...s.ui, ...patch } })),
 
-      setReferenceImages: (images) => set({ referenceImages: images }),
+      setReferenceImages: (images) =>
+        set((state) => {
+          reconcileOwnedMediaObjectUrls(
+            WORLD_IMAGES_OWNER,
+            state.referenceImages.map((reference) => reference.url),
+            images.map((reference) => reference.url),
+          );
+          return { referenceImages: images };
+        }),
 
-      setReferenceVideos: (videos) => set({ referenceVideos: videos }),
+      setReferenceVideos: (videos) =>
+        set((state) => {
+          reconcileOwnedMediaObjectUrls(
+            WORLD_VIDEOS_OWNER,
+            state.referenceVideos.map((reference) => reference.url),
+            videos.map((reference) => reference.url),
+          );
+          return { referenceVideos: videos };
+        }),
 
       setPendingRecreate: (payload) => set({ pendingRecreate: payload }),
 

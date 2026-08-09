@@ -1,6 +1,7 @@
 import {
   forwardRef,
   useCallback,
+  useEffect,
   useImperativeHandle,
   useRef,
   useState,
@@ -10,7 +11,11 @@ import { DynamicIcon } from "@storyteller/icons";
 import { toast } from "@storyteller/ui-toaster";
 import {
   UploaderStates,
+  appendMediaReference,
+  createOwnedMediaObjectUrl,
+  discardOwnedMediaObjectUrl,
   formatMediaDurationSeconds,
+  probeMediaDurationFromFile,
 } from "@storyteller/common";
 import type { UploadMediaFn } from "@storyteller/api";
 import type { RefAudio, RefImage } from "../promptStore";
@@ -73,67 +78,239 @@ export const AudioReferenceRow = forwardRef<
   const imageInputRef = useRef<HTMLInputElement>(null);
   const [isUploadingAudio, setIsUploadingAudio] = useState(false);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
-
-  // Latest-value refs so async upload callbacks append to fresh state.
   const referenceAudiosRef = useRef(referenceAudios);
-  referenceAudiosRef.current = referenceAudios;
   const referenceImagesRef = useRef(referenceImages);
-  referenceImagesRef.current = referenceImages;
+  const audioEpochRef = useRef(0);
+  const imageEpochRef = useRef(0);
+  const mountedRef = useRef(true);
+  const lastPublishedAudiosRef = useRef<RefAudio[] | null>(null);
+  const lastPublishedImagesRef = useRef<RefImage[] | null>(null);
+  const previousAudiosPropRef = useRef(referenceAudios);
+  const previousImagesPropRef = useRef(referenceImages);
+  const livePolicyRef = useRef({
+    maxAudioCount,
+    maxAudioRefDuration,
+    uploadAudio,
+    imageSupported,
+    uploadImage,
+    onReferenceAudiosChange,
+    onReferenceImagesChange,
+  });
+  livePolicyRef.current = {
+    maxAudioCount,
+    maxAudioRefDuration,
+    uploadAudio,
+    imageSupported,
+    uploadImage,
+    onReferenceAudiosChange,
+    onReferenceImagesChange,
+  };
+  const audioPolicySignature = [
+    maxAudioCount,
+    maxAudioRefDuration,
+    Boolean(uploadAudio),
+  ].join("|");
+  const imagePolicySignature = [
+    imageSupported,
+    Boolean(uploadImage),
+    Boolean(onReferenceImagesChange),
+  ].join("|");
+  const renderedPolicyRef = useRef({
+    audio: audioPolicySignature,
+    image: imagePolicySignature,
+  });
+  if (renderedPolicyRef.current.audio !== audioPolicySignature) {
+    audioEpochRef.current++;
+  }
+  if (renderedPolicyRef.current.image !== imagePolicySignature) {
+    imageEpochRef.current++;
+  }
+  renderedPolicyRef.current = {
+    audio: audioPolicySignature,
+    image: imagePolicySignature,
+  };
 
-  const processAudioFiles = async (files: File[]) => {
-    if (files.length === 0) return;
+  const audiosExternallyChanged =
+    previousAudiosPropRef.current !== referenceAudios &&
+    lastPublishedAudiosRef.current !== referenceAudios;
+  const imagesExternallyChanged =
+    previousImagesPropRef.current !== referenceImages &&
+    lastPublishedImagesRef.current !== referenceImages;
+  if (previousAudiosPropRef.current !== referenceAudios) {
+    if (audiosExternallyChanged) audioEpochRef.current++;
+    previousAudiosPropRef.current = referenceAudios;
+    lastPublishedAudiosRef.current = null;
+  }
+  if (previousImagesPropRef.current !== referenceImages) {
+    if (imagesExternallyChanged) imageEpochRef.current++;
+    previousImagesPropRef.current = referenceImages;
+    lastPublishedImagesRef.current = null;
+  }
+  referenceAudiosRef.current = referenceAudios;
+  referenceImagesRef.current = referenceImages;
+  const audioOperationsRef = useRef<Promise<void>>(Promise.resolve());
+
+  const publishAudios = (next: RefAudio[]) => {
+    referenceAudiosRef.current = next;
+    lastPublishedAudiosRef.current = next;
+    livePolicyRef.current.onReferenceAudiosChange(next);
+  };
+  const publishImages = (next: RefImage[]) => {
+    referenceImagesRef.current = next;
+    lastPublishedImagesRef.current = next;
+    livePolicyRef.current.onReferenceImagesChange?.(next);
+  };
+
+  useEffect(() => {
+    audioOperationsRef.current = Promise.resolve();
+    setIsUploadingAudio(false);
+  }, [audioPolicySignature]);
+
+  useEffect(() => {
+    setIsUploadingImage(false);
+  }, [imagePolicySignature]);
+
+  useEffect(() => {
+    if (!audiosExternallyChanged) return;
+    audioOperationsRef.current = Promise.resolve();
+    setIsUploadingAudio(false);
+  }, [referenceAudios]);
+
+  useEffect(() => {
+    if (imagesExternallyChanged) setIsUploadingImage(false);
+  }, [referenceImages]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      audioEpochRef.current++;
+      imageEpochRef.current++;
+      audioOperationsRef.current = Promise.resolve();
+    };
+  }, []);
+
+  const processAudioFilesNow = async (
+    files: File[],
+    operationEpoch: number,
+  ) => {
+    if (
+      files.length === 0 ||
+      operationEpoch !== audioEpochRef.current ||
+      !mountedRef.current
+    ) {
+      return;
+    }
 
     const audioFiles = files.filter(isAudioFile);
     if (audioFiles.length < files.length) {
       toast.error(AUDIO_FILE_TYPE_ERROR);
     }
 
-    const availableSlots = Math.max(0, maxAudioCount - referenceAudios.length);
+    const baseAudios = referenceAudiosRef.current;
+    const availableSlots = Math.max(
+      0,
+      livePolicyRef.current.maxAudioCount - baseAudios.length,
+    );
     const filesToProcess = audioFiles.slice(0, availableSlots);
 
     for (const file of filesToProcess) {
       const duration = await getAudioFileDuration(file);
-      const currentTotal = referenceAudiosRef.current.reduce(
-        (sum, audio) => sum + audio.duration,
-        0,
-      );
-      if (currentTotal + duration > maxAudioRefDuration) {
-        toast.error(
-          `Total audio duration cannot exceed ${maxAudioRefDuration}s`,
-        );
-        break;
+      if (operationEpoch !== audioEpochRef.current || !mountedRef.current) {
+        return;
       }
-
-      if (uploadAudio) {
+      if (duration == null) {
+        toast.error("Could not read audio duration");
+        continue;
+      }
+      const currentUploadAudio = livePolicyRef.current.uploadAudio;
+      if (currentUploadAudio) {
         setIsUploadingAudio(true);
-        await uploadAudio({
-          title: `reference-audio-${Math.random().toString(36).substring(2, 15)}`,
-          assetFile: file,
-          progressCallback: (newState) => {
-            if (newState.status === UploaderStates.success && newState.data) {
-              const refAudio: RefAudio = {
-                id: Math.random().toString(36).substring(7),
-                url: URL.createObjectURL(file),
-                file,
-                mediaToken: newState.data,
-                duration,
-              };
-              setIsUploadingAudio(false);
-              onReferenceAudiosChange([
-                ...referenceAudiosRef.current,
-                refAudio,
-              ]);
-            } else if (
-              newState.status === UploaderStates.assetError ||
-              newState.status === UploaderStates.imageCreateError
-            ) {
-              setIsUploadingAudio(false);
-              toast.error("Audio upload failed. Please try again.");
+        let settled = false;
+        const commit = (mediaToken: string) => {
+          if (settled) return;
+          if (
+            operationEpoch !== audioEpochRef.current ||
+            !mountedRef.current ||
+            !livePolicyRef.current.uploadAudio
+          ) {
+            settled = true;
+            return;
+          }
+          const previewUrl = createOwnedMediaObjectUrl(file);
+          const candidate: RefAudio = {
+            id: Math.random().toString(36).substring(7),
+            url: previewUrl,
+            file,
+            mediaToken,
+            duration,
+          };
+          const result = appendMediaReference(
+            referenceAudiosRef.current,
+            candidate,
+            {
+              maxCount: livePolicyRef.current.maxAudioCount,
+              maxTotalSeconds: livePolicyRef.current.maxAudioRefDuration,
+            },
+          );
+          settled = true;
+          if (result.status === "added") {
+            publishAudios(result.next);
+          } else {
+            // The URL was never committed, so no store owner retained it.
+            // The registry ignores borrowed URLs and releases this one once.
+            discardOwnedMediaObjectUrl(previewUrl);
+            if (result.status !== "duplicate") {
+              toast.error(
+                result.status === "invalid-duration"
+                  ? "Could not verify audio duration"
+                  : `Total audio duration cannot exceed ${livePolicyRef.current.maxAudioRefDuration}s`,
+              );
             }
-          },
-        });
+          }
+        };
+        const reject = (showError: boolean) => {
+          if (settled) return;
+          settled = true;
+          if (showError) toast.error("Audio upload failed. Please try again.");
+        };
+        try {
+          await currentUploadAudio({
+            title: `reference-audio-${Math.random().toString(36).substring(2, 15)}`,
+            assetFile: file,
+            progressCallback: (newState) => {
+              if (newState.status === UploaderStates.success && newState.data) {
+                commit(newState.data);
+              } else if (
+                newState.status === UploaderStates.assetError ||
+                newState.status === UploaderStates.imageCreateError
+              ) {
+                reject(true);
+              }
+            },
+          });
+        } catch {
+          reject(true);
+        } finally {
+          reject(false);
+          if (mountedRef.current && operationEpoch === audioEpochRef.current) {
+            setIsUploadingAudio(false);
+          }
+        }
       }
     }
+  };
+
+  const processAudioFiles = (files: File[]): Promise<void> => {
+    const operationEpoch = audioEpochRef.current;
+    const operation = audioOperationsRef.current.then(() =>
+      processAudioFilesNow(files, operationEpoch),
+    );
+    audioOperationsRef.current = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   };
 
   const handleAudioFileUpload = async (
@@ -144,31 +321,63 @@ export const AudioReferenceRow = forwardRef<
   };
 
   const processImageFile = async (file: File) => {
-    if (!uploadImage) return;
+    const operationEpoch = imageEpochRef.current;
+    const currentUploadImage = livePolicyRef.current.uploadImage;
+    if (
+      !currentUploadImage ||
+      !livePolicyRef.current.imageSupported ||
+      !livePolicyRef.current.onReferenceImagesChange
+    ) {
+      return;
+    }
 
     setIsUploadingImage(true);
-    await uploadImage({
-      title: `reference-image-${Math.random().toString(36).substring(2, 15)}`,
-      assetFile: file,
-      progressCallback: (newState) => {
-        if (newState.status === UploaderStates.success && newState.data) {
-          const refImage: RefImage = {
-            id: Math.random().toString(36).substring(7),
-            url: URL.createObjectURL(file),
-            file,
-            mediaToken: newState.data,
-          };
-          setIsUploadingImage(false);
-          onReferenceImagesChange?.([refImage]);
-        } else if (
-          newState.status === UploaderStates.assetError ||
-          newState.status === UploaderStates.imageCreateError
-        ) {
-          setIsUploadingImage(false);
-          toast.error("Image upload failed. Please try again.");
-        }
-      },
-    });
+    let settled = false;
+    const reject = (showError: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (showError) toast.error("Image upload failed. Please try again.");
+    };
+    try {
+      await currentUploadImage({
+        title: `reference-image-${Math.random().toString(36).substring(2, 15)}`,
+        assetFile: file,
+        progressCallback: (newState) => {
+          if (newState.status === UploaderStates.success && newState.data) {
+            if (settled) return;
+            if (
+              operationEpoch !== imageEpochRef.current ||
+              !mountedRef.current ||
+              !livePolicyRef.current.imageSupported ||
+              !livePolicyRef.current.onReferenceImagesChange
+            ) {
+              settled = true;
+              return;
+            }
+            settled = true;
+            const refImage: RefImage = {
+              id: Math.random().toString(36).substring(7),
+              url: createOwnedMediaObjectUrl(file),
+              file,
+              mediaToken: newState.data,
+            };
+            publishImages([refImage]);
+          } else if (
+            newState.status === UploaderStates.assetError ||
+            newState.status === UploaderStates.imageCreateError
+          ) {
+            reject(true);
+          }
+        },
+      });
+    } catch {
+      reject(true);
+    } finally {
+      reject(false);
+      if (mountedRef.current && operationEpoch === imageEpochRef.current) {
+        setIsUploadingImage(false);
+      }
+    }
   };
 
   const handleImageFileUpload = async (
@@ -190,7 +399,9 @@ export const AudioReferenceRow = forwardRef<
   );
 
   const removeAudio = (id: string) => {
-    onReferenceAudiosChange(referenceAudios.filter((a) => a.id !== id));
+    publishAudios(
+      referenceAudiosRef.current.filter((audio) => audio.id !== id),
+    );
     if (audioInputRef.current) audioInputRef.current.value = "";
   };
 
@@ -220,7 +431,11 @@ export const AudioReferenceRow = forwardRef<
           <span className="text-sm font-medium">
             Audio Track{" "}
             <span className="font-semibold text-base-fg/60">
-              ({referenceAudios.length}/{maxAudioCount})
+              (
+              {maxAudioCount === Number.MAX_SAFE_INTEGER
+                ? referenceAudios.length
+                : `${referenceAudios.length}/${maxAudioCount}`}
+              )
             </span>
             {audioRequired && referenceAudios.length === 0 && (
               <span className="ml-1.5 text-xs font-medium text-red-500">
@@ -283,7 +498,7 @@ export const AudioReferenceRow = forwardRef<
                 <button
                   type="button"
                   aria-label="Remove image"
-                  onClick={() => onReferenceImagesChange?.([])}
+                  onClick={() => publishImages([])}
                   className="absolute inset-0 flex items-center justify-center bg-black/60 opacity-0 transition-opacity group-hover:opacity-100"
                 >
                   <XIcon
@@ -367,18 +582,6 @@ function AudioRefTile({
   );
 }
 
-function getAudioFileDuration(file: File): Promise<number> {
-  return new Promise((resolve) => {
-    const audio = document.createElement("audio");
-    audio.preload = "metadata";
-    audio.onloadedmetadata = () => {
-      URL.revokeObjectURL(audio.src);
-      resolve(Math.round(audio.duration));
-    };
-    audio.onerror = () => {
-      URL.revokeObjectURL(audio.src);
-      resolve(0);
-    };
-    audio.src = URL.createObjectURL(file);
-  });
+function getAudioFileDuration(file: File): Promise<number | null> {
+  return probeMediaDurationFromFile("audio", file);
 }
