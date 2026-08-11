@@ -646,3 +646,22 @@ impl From<OmniGenVideoModelDetails> for ListVideoModelsModelDetails {
     }
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn bitrate_listing_values_serialize_for_the_frontend() {
+    let values = vec![
+      ListVideoModelsBitrate::from(ApiClientBitrate::Normal),
+      ListVideoModelsBitrate::from(ApiClientBitrate::High),
+      ListVideoModelsBitrate::from(ApiClientBitrate::Unknown("future_bitrate".to_string())),
+    ];
+
+    assert_eq!(
+      serde_json::to_value(values).unwrap(),
+      serde_json::json!(["normal", "high", "future_bitrate"]),
+    );
+  }
+}

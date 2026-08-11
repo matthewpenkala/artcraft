@@ -227,7 +227,8 @@ async fn upload_grok_video(
     maybe_resolution: None,
     maybe_batch_count: None,
     maybe_generate_audio: None,
-    maybe_duration_seconds: None,  };
+    maybe_duration_seconds: None,
+    maybe_bitrate: None,  };
 
   let prompt_response = create_prompt(
     &app_env_configs.storyteller_host,
@@ -365,4 +366,3 @@ async fn upload_grok_video(
 
   Ok(())
 }
-

@@ -1,10 +1,12 @@
 use artcraft_api_defs::prompts::create_prompt::CreatePromptRequest;
 use artcraft_router::api::router_aspect_ratio::RouterAspectRatio;
+use artcraft_router::api::router_bitrate::RouterBitrate;
 use artcraft_router::api::router_resolution::RouterResolution;
 use artcraft_router::api::router_video_model::RouterVideoModel;
 use artcraft_router::api::router_provider::RouterProvider;
 use artcraft_router::generate::generate_video::generate_video_request_builder::GenerateVideoRequestBuilder;
 use enums::common::generation::common_aspect_ratio::CommonAspectRatio as EnumsAspectRatio;
+use enums::common::generation::common_bitrate::CommonBitrate;
 use enums::common::generation::common_generation_mode::CommonGenerationMode;
 use enums::common::generation::common_model_type::CommonModelType;
 use enums::common::generation::common_resolution::CommonResolution as EnumsResolution;
@@ -26,6 +28,7 @@ pub fn router_video_request_to_artcraft_prompt(
     maybe_batch_count: request.video_batch_count.map(|n| n.min(255) as u8),
     maybe_generate_audio: request.generate_audio,
     maybe_duration_seconds: request.duration_seconds.map(|d| d as u32),
+    maybe_bitrate: request.bitrate.map(router_bitrate_to_common_bitrate),
   }
 }
 
@@ -102,6 +105,13 @@ fn provider_to_generation_provider(provider: RouterProvider) -> GenerationProvid
     RouterProvider::GmiCloud => GenerationProvider::Artcraft,
     RouterProvider::GrokApi => GenerationProvider::Artcraft,
     RouterProvider::WorldLabs => GenerationProvider::Artcraft,
+  }
+}
+
+fn router_bitrate_to_common_bitrate(bitrate: RouterBitrate) -> CommonBitrate {
+  match bitrate {
+    RouterBitrate::Normal => CommonBitrate::Normal,
+    RouterBitrate::High => CommonBitrate::High,
   }
 }
 
@@ -184,6 +194,7 @@ mod tests {
     assert!(prompt.maybe_batch_count.is_none());
     assert!(prompt.maybe_generate_audio.is_none());
     assert!(prompt.maybe_duration_seconds.is_none());
+    assert!(prompt.maybe_bitrate.is_none());
   }
 
   #[test]
@@ -195,6 +206,7 @@ mod tests {
       duration_seconds: Some(10),
       video_batch_count: Some(2),
       generate_audio: Some(true),
+      bitrate: Some(RouterBitrate::High),
       ..base_builder()
     };
     let prompt = router_video_request_to_artcraft_prompt(&builder);
@@ -204,6 +216,7 @@ mod tests {
     assert_eq!(prompt.maybe_duration_seconds, Some(10));
     assert_eq!(prompt.maybe_batch_count, Some(2));
     assert_eq!(prompt.maybe_generate_audio, Some(true));
+    assert_eq!(prompt.maybe_bitrate, Some(CommonBitrate::High));
   }
 
   #[test]

@@ -21,8 +21,10 @@ import {
   getVideoDurationConstraint,
   hasVideoDurationConfiguration,
   projectVideoDuration,
+  resolveVideoBitrate,
   SizeIconOption,
   SizeOption,
+  videoBitrateLabel,
   VideoModel,
 } from "@storyteller/model-list";
 import {
@@ -176,6 +178,8 @@ export const PromptBoxVideo = ({
   const setResolution = usePromptVideoStore((s) => s.setResolution);
   const aspectRatio = usePromptVideoStore((s) => s.aspectRatio);
   const setAspectRatio = usePromptVideoStore((s) => s.setAspectRatio);
+  const bitrate = usePromptVideoStore((s) => s.bitrate);
+  const setBitrate = usePromptVideoStore((s) => s.setBitrate);
   const duration = usePromptVideoStore((s) => s.duration);
   const setDuration = usePromptVideoStore((s) => s.setDuration);
   const inputMode = usePromptVideoStore((s) => s.inputMode);
@@ -591,6 +595,26 @@ export const PromptBoxVideo = ({
 
   const handleResolutionSelect = (selectedItem: PopoverItem) => {
     setResolution(selectedItem.label);
+  };
+
+  // Keep the stored user/Recreate preference sticky across model switches;
+  // derive a legal effective value for this model's UI and request instead.
+  const resolvedBitrate = resolveVideoBitrate(selectedModel, bitrate);
+  const bitratePickerOptions: PopoverItem[] | null = selectedModel
+    ?.bitrateOptions?.length
+    ? selectedModel.bitrateOptions.map((option) => ({
+        label: videoBitrateLabel(option),
+        selected: option === resolvedBitrate,
+      }))
+    : null;
+
+  const handleBitrateSelect = (selectedItem: PopoverItem) => {
+    const selectedBitrate = selectedModel?.bitrateOptions?.find(
+      (option) => videoBitrateLabel(option) === selectedItem.label,
+    );
+    if (selectedBitrate !== undefined) {
+      setBitrate(selectedBitrate);
+    }
   };
 
   const inputModeOptions: PopoverItem[] | null =
@@ -1380,6 +1404,14 @@ export const PromptBoxVideo = ({
           request.duration_seconds = requestDuration;
         }
 
+        const requestBitrate = resolveVideoBitrate(
+          selectedModel,
+          usePromptVideoStore.getState().bitrate,
+        );
+        if (requestBitrate !== null) {
+          request.bitrate = requestBitrate;
+        }
+
         // Pass the chosen resolution when the model exposes a resolution picker.
         // Guarded on `resolutionOptions` so a stale store value (left over from a
         // model that did support resolution) isn't sent for one that doesn't.
@@ -1669,6 +1701,22 @@ export const PromptBoxVideo = ({
                     onSelect={handleResolutionSelect}
                     mode="toggle"
                     panelTitle="Resolution"
+                  />
+                </Tooltip>
+              )}
+
+              {bitratePickerOptions && (
+                <Tooltip
+                  content="Bitrate"
+                  position="top"
+                  className="z-50"
+                  closeOnClick={true}
+                >
+                  <PopoverMenu
+                    items={bitratePickerOptions}
+                    onSelect={handleBitrateSelect}
+                    mode="toggle"
+                    panelTitle="Bitrate"
                   />
                 </Tooltip>
               )}

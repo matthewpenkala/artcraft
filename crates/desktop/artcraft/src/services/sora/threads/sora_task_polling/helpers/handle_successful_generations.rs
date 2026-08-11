@@ -95,6 +95,7 @@ pub async fn handle_classic_successful_generations(
       maybe_batch_count: None,
       maybe_generate_audio: None,
       maybe_duration_seconds: None,
+      maybe_bitrate: None,
     };
 
     let prompt_response = create_prompt(

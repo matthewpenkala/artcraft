@@ -48,7 +48,13 @@ import {
   SizeIconOption,
   VideoModel,
 } from "@storyteller/model-list";
-import { buildDesktopRecreateTransaction } from "./desktopMediaActions";
+import { CommonBitrate } from "@storyteller/api-enums";
+import { usePromptVideoStore } from "@storyteller/ui-promptbox";
+import { useTabStore } from "~/pages/Stores/TabState";
+import {
+  applyMakeVideoFromImage,
+  buildDesktopRecreateTransaction,
+} from "./desktopMediaActions";
 
 const imageModel = () =>
   new ImageModel({
@@ -134,6 +140,7 @@ const prompt = (value: Record<string, unknown>) =>
     maybe_generate_audio: null,
     maybe_duration_seconds: null,
     maybe_generation_mode: null,
+    maybe_bitrate: null,
     ...value,
   }) as Parameters<typeof buildDesktopRecreateTransaction>[0]["promptData"];
 
@@ -284,6 +291,93 @@ describe("desktop Recreate transaction builder", () => {
         hydration,
       ),
     ).rejects.toThrow("context is incomplete");
+  });
+
+  it("restores only a legal bitrate and otherwise commits the model fallback", async () => {
+    const target = videoModel({
+      bitrateOptions: [CommonBitrate.Normal, CommonBitrate.High],
+      defaultBitrate: CommonBitrate.Normal,
+    });
+    const build = (maybeBitrate: string | null) =>
+      buildDesktopRecreateTransaction(
+        {
+          mediaClass: "video",
+          promptData: prompt({
+            maybe_model_type: target.tauriId,
+            maybe_bitrate: maybeBitrate,
+          }),
+        },
+        { imageModels: [imageModel()], videoModels: [target] },
+        hydration,
+      );
+
+    const restored = await build(CommonBitrate.High);
+    const absent = await build(null);
+    const invalid = await build("future_bitrate");
+    const unsupported = await buildDesktopRecreateTransaction(
+      {
+        mediaClass: "video",
+        promptData: prompt({
+          maybe_model_type: "no-bitrate",
+          maybe_bitrate: CommonBitrate.High,
+        }),
+      },
+      {
+        imageModels: [imageModel()],
+        videoModels: [
+          videoModel({
+            id: "no-bitrate",
+            tauriId: "no-bitrate",
+            bitrateOptions: [],
+          }),
+        ],
+      },
+      hydration,
+    );
+
+    expect(restored.mediaClass).toBe("video");
+    expect(absent.mediaClass).toBe("video");
+    expect(invalid.mediaClass).toBe("video");
+    expect(unsupported.mediaClass).toBe("video");
+    if (
+      restored.mediaClass !== "video" ||
+      absent.mediaClass !== "video" ||
+      invalid.mediaClass !== "video" ||
+      unsupported.mediaClass !== "video"
+    ) {
+      throw new Error("unreachable");
+    }
+    expect(restored.state.bitrate).toBe(CommonBitrate.High);
+    expect(absent.state.bitrate).toBe(CommonBitrate.Normal);
+    expect(invalid.state.bitrate).toBe(CommonBitrate.Normal);
+    expect(unsupported.state.bitrate).toBeNull();
+  });
+
+  it("preserves the current legal bitrate when making video from an image", async () => {
+    const commitRecreate = vi.fn();
+    vi.mocked(usePromptVideoStore.getState).mockReturnValue({
+      resolution: "720p",
+      aspectRatio: "16:9",
+      bitrate: CommonBitrate.High,
+      generateWithSound: false,
+      duration: 5,
+      generationCount: 2,
+      commitRecreate,
+    } as ReturnType<typeof usePromptVideoStore.getState>);
+    vi.mocked(useTabStore.getState).mockReturnValue({
+      setActiveTab: vi.fn(),
+    } as ReturnType<typeof useTabStore.getState>);
+
+    await applyMakeVideoFromImage("blob:frame", "frame-token");
+
+    expect(commitRecreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bitrate: CommonBitrate.High,
+        referenceImages: [
+          expect.objectContaining({ mediaToken: "frame-token" }),
+        ],
+      }),
+    );
   });
 
   it("rejects raw video semantics in an image transaction before exclusion", async () => {

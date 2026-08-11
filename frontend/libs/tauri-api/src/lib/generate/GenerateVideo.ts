@@ -6,7 +6,7 @@ import {
   CommonResolution,
   VideoModel,
 } from "@storyteller/model-list";
-import { GenerationProvider } from "@storyteller/api-enums";
+import { CommonBitrate, GenerationProvider } from "@storyteller/api-enums";
 
 export interface GenerateVideoRequest {
   // The provider to use (defaults to Artcraft/Storyteller).
@@ -35,6 +35,7 @@ export interface GenerateVideoRequest {
 
   aspect_ratio?: CommonAspectRatio;
   resolution?: CommonResolution;
+  bitrate?: CommonBitrate;
 
   duration_seconds?: number;
   generate_audio?: boolean;
@@ -63,6 +64,7 @@ interface RawGenerateVideoRequest {
   reference_character_tokens?: string[];
   aspect_ratio?: CommonAspectRatio;
   resolution?: CommonResolution;
+  bitrate?: CommonBitrate;
   duration_seconds?: number;
   generate_audio?: boolean;
   video_batch_count?: number;
@@ -141,6 +143,7 @@ export const GenerateVideo = async (
   }
   if (!!request.aspect_ratio) mutableRequest.aspect_ratio = request.aspect_ratio;
   if (!!request.resolution) mutableRequest.resolution = request.resolution;
+  if (!!request.bitrate) mutableRequest.bitrate = request.bitrate;
   if (typeof request.duration_seconds === "number") {
     mutableRequest.duration_seconds = request.duration_seconds;
   }

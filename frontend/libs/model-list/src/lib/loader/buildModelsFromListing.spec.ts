@@ -1,8 +1,10 @@
 import { VideoModel } from "../classes/VideoModel.js";
+import { resolveVideoBitrate } from "../classes/properties/VideoBitrate.js";
 import { getVideoDurationConstraint } from "../classes/properties/VideoDuration.js";
 import { getEffectiveVideoReferenceCapabilities } from "../classes/properties/VideoReferenceCapabilities.js";
 import { ModelCreator } from "../classes/metadata/ModelCreator.js";
 import { buildVideoModelsFromListing } from "./buildModelsFromListing.js";
+import { CommonBitrate } from "@storyteller/api-enums";
 
 const overlayVideoModel = (durationOptions: number[] = [5, 10]) =>
   new VideoModel({
@@ -40,6 +42,23 @@ const overlayReferenceModel = () =>
     maxVideoRefDuration: 15,
     maxReferenceAudios: 2,
     maxAudioRefDuration: 15,
+  });
+
+const overlayBitrateModel = () =>
+  new VideoModel({
+    id: "fictional_bitrate_video",
+    tauriId: "fictional_bitrate_video",
+    fullName: "Fictional bitrate video",
+    category: "video",
+    creator: ModelCreator.ArtCraft,
+    selectorName: "Fictional bitrate video",
+    selectorDescription: "Test fixture",
+    selectorBadges: [],
+    startFrame: false,
+    endFrame: false,
+    requiresImage: false,
+    bitrateOptions: [CommonBitrate.High],
+    defaultBitrate: CommonBitrate.High,
   });
 
 describe("buildVideoModelsFromListing duration capabilities", () => {
@@ -370,5 +389,89 @@ describe("buildVideoModelsFromListing batch capabilities", () => {
       defaultGenerationCount: 4,
       predefinedGenerationCounts: undefined,
     });
+  });
+});
+
+describe("buildVideoModelsFromListing bitrate capabilities", () => {
+  it("hydrates known options and resolves the catalog default", () => {
+    const [model] = buildVideoModelsFromListing(
+      [],
+      [
+        {
+          model: "server_bitrate_video",
+          bitrate_options: ["normal", "high"],
+          bitrate_default: "high",
+        },
+      ],
+      ["server_bitrate_video"],
+    );
+
+    expect(model.bitrateOptions).toEqual([
+      CommonBitrate.Normal,
+      CommonBitrate.High,
+    ]);
+    expect(model.defaultBitrate).toBe(CommonBitrate.High);
+    expect(resolveVideoBitrate(model, null)).toBe(CommonBitrate.High);
+  });
+
+  it("filters unknown and duplicate listing values before they reach Tauri", () => {
+    const [model] = buildVideoModelsFromListing(
+      [],
+      [
+        {
+          model: "future_bitrate_video",
+          bitrate_options: ["high", "future", "normal", "high"],
+          bitrate_default: "future",
+        },
+      ],
+      ["future_bitrate_video"],
+    );
+
+    expect(model.bitrateOptions).toEqual([
+      CommonBitrate.High,
+      CommonBitrate.Normal,
+    ]);
+    expect(model.defaultBitrate).toBeUndefined();
+    expect(resolveVideoBitrate(model, null)).toBe(CommonBitrate.High);
+  });
+
+  it("uses an overlay only when listing bitrate fields are absent", () => {
+    const [fallback] = buildVideoModelsFromListing(
+      [overlayBitrateModel()],
+      [{ model: "fictional_bitrate_video" }],
+      ["fictional_bitrate_video"],
+    );
+    const [explicitEmpty] = buildVideoModelsFromListing(
+      [overlayBitrateModel()],
+      [
+        {
+          model: "fictional_bitrate_video",
+          bitrate_options: [],
+        },
+      ],
+      ["fictional_bitrate_video"],
+    );
+
+    expect(fallback.bitrateOptions).toEqual([CommonBitrate.High]);
+    expect(fallback.defaultBitrate).toBe(CommonBitrate.High);
+    expect(explicitEmpty.bitrateOptions).toEqual([]);
+    expect(resolveVideoBitrate(explicitEmpty, CommonBitrate.High)).toBeNull();
+  });
+
+  it("does not revive an overlay default when the listing default is unknown", () => {
+    const [model] = buildVideoModelsFromListing(
+      [overlayBitrateModel()],
+      [
+        {
+          model: "fictional_bitrate_video",
+          bitrate_options: ["normal", "high"],
+          bitrate_default: "future_bitrate",
+        },
+      ],
+      ["fictional_bitrate_video"],
+    );
+
+    expect(model.defaultBitrate).toBeUndefined();
+    expect(resolveVideoBitrate(model, null)).toBe(CommonBitrate.Normal);
   });
 });

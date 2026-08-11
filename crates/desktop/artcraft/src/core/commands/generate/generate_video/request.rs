@@ -1,4 +1,5 @@
 use artcraft_router::api::router_aspect_ratio::RouterAspectRatio;
+use artcraft_router::api::router_bitrate::RouterBitrate;
 use artcraft_router::api::router_resolution::RouterResolution;
 use enums::common::generation_provider::GenerationProvider;
 use enums::tauri::ux::tauri_command_caller::TauriCommandCaller;
@@ -103,6 +104,7 @@ pub struct TauriGenerateVideoRequest {
 
   pub aspect_ratio: Option<RouterAspectRatio>,
   pub resolution: Option<RouterResolution>,
+  pub bitrate: Option<RouterBitrate>,
 
   pub duration_seconds: Option<u16>,
   pub generate_audio: Option<bool>,
@@ -149,4 +151,39 @@ pub enum TauriGenerateVideoErrorType {
   NeedsFalApiKey,
   FalError,
   NeedsStorytellerCredentials,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use serde_json::json;
+
+  #[test]
+  fn deserializes_known_bitrate() {
+    let request: TauriGenerateVideoRequest = serde_json::from_value(json!({
+      "model": "seedance_2p0",
+      "bitrate": "high",
+    })).unwrap();
+
+    assert_eq!(request.bitrate, Some(RouterBitrate::High));
+  }
+
+  #[test]
+  fn omitted_bitrate_remains_none() {
+    let request: TauriGenerateVideoRequest = serde_json::from_value(json!({
+      "model": "seedance_2p0",
+    })).unwrap();
+
+    assert_eq!(request.bitrate, None);
+  }
+
+  #[test]
+  fn rejects_unknown_bitrate_before_routing() {
+    let result = serde_json::from_value::<TauriGenerateVideoRequest>(json!({
+      "model": "seedance_2p0",
+      "bitrate": "future_bitrate",
+    }));
+
+    assert!(result.is_err());
+  }
 }

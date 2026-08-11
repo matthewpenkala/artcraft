@@ -3,7 +3,7 @@ import { Model, ModelKind } from "./Model.js";
 import { ModelCategory } from "../legacy/ModelConfig.js";
 import { ModelTag } from "./metadata/ModelTag.js";
 import { SizeOption } from "./metadata/SizeOption.js";
-import { GenerationProvider } from "@storyteller/api-enums";
+import { CommonBitrate, GenerationProvider } from "@storyteller/api-enums";
 import {
   isValidVideoDuration,
   normalizeVideoDurationOptions,
@@ -86,6 +86,10 @@ export class VideoModel extends Model {
   // Default resolution
   readonly defaultResolution?: string;
 
+  // Available output bitrate levels and the catalog-declared default
+  readonly bitrateOptions?: CommonBitrate[];
+  readonly defaultBitrate?: CommonBitrate;
+
   // Whether the model supports the system prompt toggle (default true)
   readonly supportsSystemPrompt: boolean;
 
@@ -132,6 +136,8 @@ export class VideoModel extends Model {
     maxAudioRefDuration?: number;
     resolutionOptions?: string[];
     defaultResolution?: string;
+    bitrateOptions?: CommonBitrate[];
+    defaultBitrate?: CommonBitrate;
     supportsSystemPrompt?: boolean;
     supportsCommonAspectRatio?: boolean;
     maxPromptLength?: number;
@@ -214,6 +220,8 @@ export class VideoModel extends Model {
     this.maxAudioRefDuration = args.maxAudioRefDuration;
     this.resolutionOptions = args.resolutionOptions;
     this.defaultResolution = args.defaultResolution;
+    this.bitrateOptions = args.bitrateOptions;
+    this.defaultBitrate = args.defaultBitrate;
     this.supportsSystemPrompt = args.supportsSystemPrompt ?? true;
     this.supportsCommonAspectRatio = args.supportsCommonAspectRatio ?? false;
     const validCount = (value: unknown): value is number =>

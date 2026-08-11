@@ -25,6 +25,10 @@ import { SizeIconOption, SizeOption } from "../classes/metadata/SizeOption.js";
 import { CommonAspectRatio } from "../classes/properties/CommonAspectRatio.js";
 import { CommonResolution } from "../classes/properties/CommonResolution.js";
 import { CommonQuality } from "../classes/properties/CommonQuality.js";
+import {
+  commonBitrateFromString,
+  normalizeVideoBitrateOptions,
+} from "../classes/properties/VideoBitrate.js";
 import { MODEL_ID_PREFIX_CREATORS } from "../classes/metadata/ModelCreatorIconForId.js";
 
 // ── Structural shapes of the backend listing (subset we read) ──────────────
@@ -74,6 +78,8 @@ export interface ListingVideoModel extends ListingModelBase {
   duration_seconds_max?: number | null;
   duration_seconds_max_with_image_references?: number | null;
   duration_seconds_default?: number | null;
+  bitrate_options?: string[] | null;
+  bitrate_default?: string | null;
 }
 
 // ── Public builders ────────────────────────────────────────────────────────
@@ -252,6 +258,11 @@ const mergedVideoModel = (
     m.aspect_ratio_options,
     COMMON_ASPECT_RATIO_VALUES,
   );
+  const bitrateOptions = normalizeVideoBitrateOptions(m.bitrate_options);
+  const defaultBitrate =
+    m.bitrate_default === undefined
+      ? o?.defaultBitrate
+      : commonBitrateFromString(m.bitrate_default);
   const fullName = m.full_name ?? o?.fullName ?? m.model;
 
   return new VideoModel({
@@ -312,6 +323,8 @@ const mergedVideoModel = (
     defaultResolution: m.resolution_default
       ? resolutionLabel(m.resolution_default)
       : o?.defaultResolution,
+    bitrateOptions: bitrateOptions ?? o?.bitrateOptions,
+    defaultBitrate,
     // Aspect handling: API aspect ratios drive the modern picker; legacy
     // models (grok/sora native size UI) keep their overlay sizeOptions.
     sizeOptions:

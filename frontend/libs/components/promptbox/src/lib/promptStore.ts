@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { CommonAspectRatio } from "@storyteller/model-list";
 import { CommonResolution } from "@storyteller/model-list";
 import { CommonQuality } from "@storyteller/model-list";
+import { CommonBitrate } from "@storyteller/api-enums";
 import {
   reconcileOwnedMediaObjectUrlOwners,
   reconcileOwnedMediaObjectUrls,
@@ -211,6 +212,7 @@ export interface PromptVideoRecreateState {
   prompt: string;
   resolution: Resolution | string;
   aspectRatio: string | null;
+  bitrate: CommonBitrate | null;
   referenceImages: RefImage[];
   endFrameImage?: RefImage;
   referenceVideos: RefVideo[];
@@ -225,6 +227,7 @@ export interface PromptVideoStore {
   prompt: string;
   resolution: Resolution | string;
   aspectRatio: string | null;
+  bitrate: CommonBitrate | null;
   useSystemPrompt: boolean;
   referenceImages: RefImage[];
   endFrameImage?: RefImage;
@@ -237,6 +240,7 @@ export interface PromptVideoStore {
   setPrompt: (prompt: string) => void;
   setResolution: (resolution: Resolution | string) => void;
   setAspectRatio: (aspectRatio: string | null) => void;
+  setBitrate: (bitrate: CommonBitrate | null) => void;
   setUseSystemPrompt: (value: boolean) => void;
   setReferenceImages: (images: RefImage[]) => void;
   setEndFrameImage: (image?: RefImage) => void;
@@ -254,6 +258,7 @@ export const usePromptVideoStore = create<PromptVideoStore>()((set) => ({
   prompt: "",
   resolution: "720p",
   aspectRatio: null,
+  bitrate: null,
   useSystemPrompt: true,
   referenceImages: [],
   endFrameImage: undefined,
@@ -266,6 +271,7 @@ export const usePromptVideoStore = create<PromptVideoStore>()((set) => ({
   setPrompt: (prompt) => set({ prompt }),
   setResolution: (resolution) => set({ resolution }),
   setAspectRatio: (aspectRatio) => set({ aspectRatio }),
+  setBitrate: (bitrate) => set({ bitrate }),
   setUseSystemPrompt: (useSystemPrompt) => set({ useSystemPrompt }),
   setReferenceImages: (referenceImages) =>
     set((state) => {

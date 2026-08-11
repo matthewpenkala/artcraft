@@ -26,9 +26,11 @@ import {
   CommonAspectRatio,
   CommonQuality,
   CommonResolution,
+  commonBitrateFromString,
   getEffectiveVideoReferenceCapabilities,
   hasVideoDurationConfiguration,
   type ImageModel,
+  resolveVideoBitrate,
   resolveVideoDuration,
   type VideoModel,
 } from "@storyteller/model-list";
@@ -187,6 +189,7 @@ export async function applyMakeVideoFromImage(
       prompt: "",
       resolution: videoState.resolution,
       aspectRatio: videoState.aspectRatio,
+      bitrate: videoState.bitrate,
       referenceImages: [referenceImage],
       endFrameImage: undefined,
       referenceVideos: [],
@@ -507,6 +510,10 @@ export async function buildDesktopRecreateTransaction(
         ? (promptData.maybe_generate_audio ?? false)
         : false,
       aspectRatio,
+      bitrate: resolveVideoBitrate(
+        model,
+        commonBitrateFromString(promptData.maybe_bitrate),
+      ),
       resolution:
         resolveTargetModelOption(
           restoredResolution,

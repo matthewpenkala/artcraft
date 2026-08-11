@@ -1,4 +1,5 @@
 use enums::common::generation::common_aspect_ratio::CommonAspectRatio;
+use enums::common::generation::common_bitrate::CommonBitrate;
 use enums::common::generation::common_generation_mode::CommonGenerationMode;
 use enums::common::generation::common_model_type::CommonModelType;
 use enums::common::generation::common_resolution::CommonResolution;
@@ -43,6 +44,9 @@ pub struct CreatePromptRequest {
 
   /// OPTIONAL. The duration in seconds.
   pub maybe_duration_seconds: Option<u32>,
+
+  /// OPTIONAL. The video bitrate.
+  pub maybe_bitrate: Option<CommonBitrate>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]

@@ -33,37 +33,7 @@ pub(super) async fn handle_artcraft_video_via_router(
     creds.clone(),
   ));
 
-  let start_frame = request.image_media_token.clone().map(ImageRef::MediaFileToken);
-  let end_frame = request.end_frame_image_media_token.clone().map(ImageRef::MediaFileToken);
-
-  let reference_images = request.reference_image_media_tokens.clone().map(ImageListRef::MediaFileTokens);
-  let reference_videos = request.reference_video_media_tokens.clone().map(VideoListRef::MediaFileTokens);
-  let reference_audio = request.reference_audio_media_tokens.clone().map(AudioListRef::MediaFileTokens);
-
-  let reference_character_tokens = request.reference_character_tokens.clone().map(CharacterListRef::CharacterTokens);
-
-  let router_request = GenerateVideoRequestBuilder {
-    model,
-    provider: RouterProvider::Artcraft,
-    prompt: request.prompt.clone(),
-    start_frame,
-    end_frame,
-    reference_images,
-    reference_videos,
-    reference_audio,
-    reference_character_tokens,
-    resolution: request.resolution,
-    aspect_ratio: request.aspect_ratio,
-    bitrate: None,
-    duration_seconds: request.duration_seconds,
-    video_batch_count: request.video_batch_count,
-    generate_audio: request.generate_audio,
-    total_reference_video_input_seconds: None,
-    request_mismatch_mitigation_strategy: RequestMismatchMitigationStrategy::PayMoreUpgrade,
-    idempotency_token: None,
-    negative_prompt: None,
-  };
-
+  let router_request = build_router_request(request, model);
   info!("Building request for artcraft_router (v2 pipeline)...");
   let response = generate_via_v2(router_request, &client).await?;
 
@@ -80,6 +50,42 @@ pub(super) async fn handle_artcraft_video_via_router(
     maybe_prompt_token: None,
     maybe_queue_response_url: None,
   })
+}
+
+fn build_router_request(
+  request: &TauriGenerateVideoRequest,
+  model: RouterVideoModel,
+) -> GenerateVideoRequestBuilder {
+  let start_frame = request.image_media_token.clone().map(ImageRef::MediaFileToken);
+  let end_frame = request.end_frame_image_media_token.clone().map(ImageRef::MediaFileToken);
+
+  let reference_images = request.reference_image_media_tokens.clone().map(ImageListRef::MediaFileTokens);
+  let reference_videos = request.reference_video_media_tokens.clone().map(VideoListRef::MediaFileTokens);
+  let reference_audio = request.reference_audio_media_tokens.clone().map(AudioListRef::MediaFileTokens);
+
+  let reference_character_tokens = request.reference_character_tokens.clone().map(CharacterListRef::CharacterTokens);
+
+  GenerateVideoRequestBuilder {
+    model,
+    provider: RouterProvider::Artcraft,
+    prompt: request.prompt.clone(),
+    start_frame,
+    end_frame,
+    reference_images,
+    reference_videos,
+    reference_audio,
+    reference_character_tokens,
+    resolution: request.resolution,
+    aspect_ratio: request.aspect_ratio,
+    bitrate: request.bitrate,
+    duration_seconds: request.duration_seconds,
+    video_batch_count: request.video_batch_count,
+    generate_audio: request.generate_audio,
+    total_reference_video_input_seconds: None,
+    request_mismatch_mitigation_strategy: RequestMismatchMitigationStrategy::PayMoreUpgrade,
+    idempotency_token: None,
+    negative_prompt: None,
+  }
 }
 
 /// V2 pipeline: build2 → send_request (Artcraft skips draft phase).
@@ -104,4 +110,40 @@ async fn generate_via_v2(
 
   info!("V2 successfully enqueued.");
   Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use artcraft_router::api::router_bitrate::RouterBitrate;
+  use serde_json::json;
+
+  #[test]
+  fn maps_tauri_bitrate_to_router_builder() {
+    let request: TauriGenerateVideoRequest = serde_json::from_value(json!({
+      "model": "seedance_2p0",
+      "bitrate": "high",
+    })).unwrap();
+
+    let router_request = build_router_request(
+      &request,
+      RouterVideoModel::Seedance2p0,
+    );
+
+    assert_eq!(router_request.bitrate, Some(RouterBitrate::High));
+  }
+
+  #[test]
+  fn preserves_omitted_bitrate() {
+    let request: TauriGenerateVideoRequest = serde_json::from_value(json!({
+      "model": "seedance_2p0",
+    })).unwrap();
+
+    let router_request = build_router_request(
+      &request,
+      RouterVideoModel::Seedance2p0,
+    );
+
+    assert_eq!(router_request.bitrate, None);
+  }
 }

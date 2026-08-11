@@ -5,6 +5,13 @@ export * from "./lib/classes/properties/CommonAspectRatio.js";
 export * from "./lib/classes/properties/CommonResolution.js";
 export * from "./lib/classes/properties/CommonQuality.js";
 export {
+  commonBitrateFromString,
+  normalizeVideoBitrateOptions,
+  resolveVideoBitrate,
+  videoBitrateLabel,
+  type VideoBitrateCapabilities,
+} from "./lib/classes/properties/VideoBitrate.js";
+export {
   getVideoDurationConstraint,
   hasVideoDurationConfiguration,
   projectVideoDuration,

@@ -26,6 +26,7 @@ pub fn router_image_request_to_artcraft_prompt(
     maybe_batch_count: request.image_batch_count.map(|n| n.min(255) as u8),
     maybe_generate_audio: None,
     maybe_duration_seconds: None,
+    maybe_bitrate: None,
   }
 }
 
