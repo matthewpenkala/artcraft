@@ -46,6 +46,11 @@ type CreateImageState = {
   setReferenceImages: (images: RefImage[]) => void;
   setPendingRecreate: (payload: RecreatePayload | null) => void;
   consumePendingRecreate: () => RecreatePayload | null;
+  commitPendingRecreate: (
+    payload: RecreatePayload,
+    ui: ImageUiState,
+    referenceImages: RefImage[],
+  ) => boolean;
   setPendingRefImages: (refs: RefImage[] | null) => void;
   startBatch: (
     prompt: string,
@@ -92,6 +97,21 @@ export const useCreateImageStore = create<CreateImageState>()(
         const payload = get().pendingRecreate;
         if (payload) set({ pendingRecreate: null });
         return payload;
+      },
+
+      commitPendingRecreate: (payload, ui, referenceImages) => {
+        let committed = false;
+        set((state) => {
+          if (state.pendingRecreate !== payload) return state;
+          reconcileImageUrls(
+            IMAGE_REFS_OWNER,
+            state.referenceImages,
+            referenceImages,
+          );
+          committed = true;
+          return { pendingRecreate: null, ui, referenceImages };
+        });
+        return committed;
       },
 
       setPendingRefImages: (refs) =>

@@ -49,6 +49,8 @@ describe("webapp reference duration display consumers", () => {
     expect(createVideo).toContain("formatMediaDurationSeconds(remaining)");
     expect(createVideo).toContain("remainingMediaDurationSeconds(");
     expect(createVideo).toContain("appendProbedMediaReferenceBatch(");
+    expect(createVideo).toContain("const referenceMediaProjection = useMemo(");
+    expect(createVideo).toContain("referenceMediaProjection;");
     expect(createVideo).toContain(
       'referenceOperationKey={`${selectedModel?.model ?? ""}:${isReferenceMode}`}',
     );
@@ -63,5 +65,43 @@ describe("webapp reference duration display consumers", () => {
     const combined = `${mediaReferenceRow}\n${promptBox}`;
     expect(combined).not.toMatch(/\{(?:video|audio)\.duration\}s/);
     expect(combined).not.toMatch(/\$\{total(?:Video|Audio)RefSeconds\}/);
+  });
+
+  it("does not clamp duration merely because empty Reference mode was selected", () => {
+    const createVideo = readFileSync(
+      workspaceFile(
+        "frontend/apps/artcraft-webapp/src/pages/create-video/create-video.tsx",
+      ),
+      "utf8",
+    );
+    const handlerStart = createVideo.indexOf(
+      "const handleInputModeChange = useCallback(",
+    );
+    const handlerEnd = createVideo.indexOf(
+      "const imagePickerMax =",
+      handlerStart,
+    );
+
+    expect(handlerStart).toBeGreaterThanOrEqual(0);
+    expect(handlerEnd).toBeGreaterThan(handlerStart);
+    const handler = createVideo.slice(handlerStart, handlerEnd);
+    expect(handler).not.toContain("duration_seconds_max_with_image_references");
+    expect(handler).not.toContain("setDuration(");
+  });
+
+  it("uses the same target-model image projection for UI, cost, and submit", () => {
+    const createImage = readFileSync(
+      workspaceFile(
+        "frontend/apps/artcraft-webapp/src/pages/create-image/create-image.tsx",
+      ),
+      "utf8",
+    );
+
+    expect(createImage).toContain(
+      "storedReferenceImages.slice(0, maxImageRefs)",
+    );
+    expect(createImage).toContain(
+      "imageMediaTokenCount: referenceImages.length",
+    );
   });
 });

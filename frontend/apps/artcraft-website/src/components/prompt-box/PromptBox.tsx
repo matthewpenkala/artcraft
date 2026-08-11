@@ -60,6 +60,7 @@ interface PromptBoxProps {
   // Video mode (start/end frame)
   isVideo?: boolean;
   isReferenceMode?: boolean;
+  supportsStartFrame?: boolean;
   endFrameImage?: RefImage;
   onEndFrameImageChange?: (image?: RefImage) => void;
   onReferenceFramesChange?: (images: RefImage[], endImage?: RefImage) => void;
@@ -140,6 +141,7 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
       onReferenceImagesChange,
       isVideo,
       isReferenceMode,
+      supportsStartFrame,
       endFrameImage,
       onEndFrameImageChange,
       onReferenceFramesChange,
@@ -207,13 +209,19 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
 
     const hasMentionItems = (mentionItems?.length ?? 0) > 0;
     const isKeyframeMode = !!isVideo && !isReferenceMode;
+    const canUseStartFrame = supportsStartFrame ?? !!supportsImagePrompts;
 
     const deck = useDeckMedia({
       referenceImages,
       setReferenceImages: onReferenceImagesChange,
       // 0 blocks image uploads (incl. via the combined picker) on pages whose
       // model only takes audio/video refs.
-      maxImages: supportsImagePrompts ? maxImagePromptCount : 0,
+      maxImages:
+        isKeyframeMode && !canUseStartFrame
+          ? 0
+          : supportsImagePrompts
+            ? maxImagePromptCount
+            : 0,
       setEndFrameImage: onEndFrameImageChange,
       endFrameEnabled: isKeyframeMode && !!showEndFrameSection,
       referenceVideos,
@@ -242,7 +250,9 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
     // their MIME matches, gated on what the page's model supports. Keyframe
     // mode renders no video/audio deck, so those kinds only land in
     // reference mode where the user can see (and remove) them.
-    const dropAcceptsImages = !!supportsImagePrompts && maxImagePromptCount > 0;
+    const dropAcceptsImages = isKeyframeMode
+      ? canUseStartFrame || !!showEndFrameSection
+      : !!supportsImagePrompts && maxImagePromptCount > 0;
     const dropAcceptsVideos =
       !isKeyframeMode && !!videoRefsSupported && !!onReferenceVideosChange;
     const dropAcceptsAudio =
@@ -254,7 +264,9 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
           // Fill the empty keyframe slots in order: start frame, then end.
           const queue = [...images];
           const startOpen =
-            referenceImages.length === 0 && deck.uploadingImages.length === 0;
+            canUseStartFrame &&
+            referenceImages.length === 0 &&
+            deck.uploadingImages.length === 0;
           const endOpen =
             !!showEndFrameSection && !endFrameImage && !deck.uploadingEnd;
           if (startOpen) deck.processImageFiles([queue.shift()!], "start");
@@ -491,28 +503,33 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
     // mixed deck depending on page/mode.
     const renderReferenceWidget = (alwaysExpanded?: boolean) => {
       if (isKeyframeMode) {
-        if (!supportsImagePrompts) return null;
+        if (!canUseStartFrame && !showEndFrameSection) return null;
         return (
           <KeyframeCards
             firstFrame={firstFrameItem}
             lastFrame={lastFrameItem}
+            showFirstFrame={canUseStartFrame}
             showLastFrame={!!showEndFrameSection}
-            onFirstAddActions={[
-              {
-                key: "upload-first",
-                label: "Upload",
-                onSelect: deck.openImageUpload,
-              },
-              ...(onPickFromLibrary
+            onFirstAddActions={
+              canUseStartFrame
                 ? [
                     {
-                      key: "library-first",
-                      label: "Pick from library",
-                      onSelect: onPickFromLibrary,
+                      key: "upload-first",
+                      label: "Upload",
+                      onSelect: deck.openImageUpload,
                     },
+                    ...(onPickFromLibrary
+                      ? [
+                          {
+                            key: "library-first",
+                            label: "Pick from library",
+                            onSelect: onPickFromLibrary,
+                          },
+                        ]
+                      : []),
                   ]
-                : []),
-            ]}
+                : []
+            }
             onLastAddActions={[
               {
                 key: "upload-last",
@@ -531,7 +548,11 @@ export const PromptBox = forwardRef<HTMLDivElement, PromptBoxProps>(
             ]}
             onRemoveFirst={() => deck.replaceImages([])}
             onRemoveLast={() => onEndFrameImageChange?.(undefined)}
-            onSwap={onReferenceFramesChange ? handleSwapFrames : undefined}
+            onSwap={
+              canUseStartFrame && onReferenceFramesChange
+                ? handleSwapFrames
+                : undefined
+            }
           />
         );
       }

@@ -5,26 +5,35 @@ import { PROMPT_TOOLBAR_ICON_BUTTON_CLASSES } from "../PromptClearAllButton";
 
 interface VideoGenerationCountPickerProps {
   maxCount: number;
+  minCount?: number;
+  options?: readonly number[];
   currentCount: number;
   handleCountChange: (count: number) => void;
 }
 
 export const VideoGenerationCountPicker = ({
   maxCount,
+  minCount = 1,
+  options,
   currentCount,
   handleCountChange,
 }: VideoGenerationCountPickerProps) => {
-  const options: PopoverItem[] = [];
-  for (let i = 1; i <= maxCount; i++) {
-    options.push({
-      label: String(i),
-      selected: i === currentCount,
-    });
-  }
+  const supportedCounts = options?.length
+    ? [...new Set(options)].filter(
+        (value) => value >= minCount && value <= maxCount,
+      )
+    : Array.from(
+        { length: Math.max(0, maxCount - minCount + 1) },
+        (_, index) => minCount + index,
+      );
+  const pickerOptions: PopoverItem[] = supportedCounts.map((count) => ({
+    label: String(count),
+    selected: count === currentCount,
+  }));
 
   const onSelect = (item: PopoverItem) => {
     const count = parseInt(item.label, 10);
-    if (!isNaN(count) && count >= 1 && count <= maxCount) {
+    if (!isNaN(count) && supportedCounts.includes(count)) {
       handleCountChange(count);
     }
   };
@@ -38,7 +47,7 @@ export const VideoGenerationCountPicker = ({
       delay={0}
     >
       <PopoverMenu
-        items={options}
+        items={pickerOptions}
         onSelect={onSelect}
         mode="toggle"
         panelTitle="No. of videos"

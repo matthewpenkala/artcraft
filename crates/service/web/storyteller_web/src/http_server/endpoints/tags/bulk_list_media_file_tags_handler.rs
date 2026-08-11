@@ -74,7 +74,8 @@ pub async fn bulk_list_media_file_tags_handler(
 
   let visible_tokens = filter_visible_media_file_tokens(FilterVisibleMediaFileTokensArgs {
     candidate_tokens: &media_file_tokens,
-    requester_user_token: &user_session.user_token,
+    requester_user_token: Some(&user_session.user_token),
+    requester_is_moderator: user_session.can_ban_users,
     mysql_executor: &mut *conn,
     phantom: PhantomData,
   }).await.map_err(|err| {

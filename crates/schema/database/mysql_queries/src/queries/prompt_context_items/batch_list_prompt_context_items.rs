@@ -41,7 +41,19 @@ pub async fn batch_list_prompt_context_items(
     return Ok(Vec::new());
   }
 
-  let mut query_builder: QueryBuilder<MySql> = QueryBuilder::new(r#"
+  let mut query_builder = build_batch_prompt_context_query(prompt_tokens);
+
+  let query = query_builder.build_query_as::<BatchPromptContextItem>();
+
+  let results = query.fetch_all(&mut **mysql_connection).await?;
+
+  Ok(results)
+}
+
+fn build_batch_prompt_context_query(
+  prompt_tokens: &[PromptToken],
+) -> QueryBuilder<'static, MySql> {
+  let mut query_builder: QueryBuilder<'static, MySql> = QueryBuilder::new(r#"
 SELECT
     pci.prompt_token,
     pci.media_token,
@@ -60,11 +72,20 @@ WHERE pci.prompt_token IN (
   for token in prompt_tokens {
     separated.push_bind(token.to_string());
   }
-  separated.push_unseparated(") ");
+  separated.push_unseparated(") ORDER BY pci.id ASC");
+  query_builder
+}
 
-  let query = query_builder.build_query_as::<BatchPromptContextItem>();
+#[cfg(test)]
+mod tests {
+  use super::*;
 
-  let results = query.fetch_all(&mut **mysql_connection).await?;
-
-  Ok(results)
+  #[test]
+  fn batch_context_query_preserves_insertion_order() {
+    let query = build_batch_prompt_context_query(&[
+      PromptToken::new_from_str("prompt-a"),
+      PromptToken::new_from_str("prompt-b"),
+    ]);
+    assert!(query.sql().ends_with("ORDER BY pci.id ASC"));
+  }
 }

@@ -1,3 +1,4 @@
+/* eslint-disable @nx/enforce-module-boundaries -- focused test loads local workspace source instead of stale built declarations */
 import {
   act,
   fireEvent,
@@ -30,6 +31,11 @@ const upload = vi.hoisted(() => ({
 }));
 
 vi.mock("./upload-image", () => ({ uploadImage: upload.start }));
+
+vi.mock("@storyteller/common", async () => ({
+  ...(await import("../../../../../libs/common/src/lib/enums/UploaderStates")),
+  ...(await import("../../../../../libs/common/src/lib/utils/media-object-url")),
+}));
 
 vi.mock("../ui/use-mobile", () => ({ useIsMobile: () => false }));
 
@@ -224,5 +230,25 @@ describe("webapp ImagePromptRow live reference reconciliation", () => {
     });
 
     expect(setEndFrameImage).not.toHaveBeenCalled();
+  });
+
+  it("renders an independently supported end-frame section without a start section", () => {
+    const { container } = render(
+      <ImagePromptRow
+        maxImagePromptCount={0}
+        referenceImages={[]}
+        setReferenceImages={vi.fn()}
+        isVideo
+        showStartFrameSection={false}
+        showEndFrameSection
+        setEndFrameImage={vi.fn()}
+      />,
+    );
+
+    expect(container.textContent).toContain("End Frame");
+    expect(container.textContent).not.toContain("Start Frame");
+    expect(container.querySelectorAll('input[accept="image/*"]')).toHaveLength(
+      1,
+    );
   });
 });

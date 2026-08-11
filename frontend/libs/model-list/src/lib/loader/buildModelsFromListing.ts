@@ -36,6 +36,7 @@ export interface ListingModelBase {
   text_prompt_supported?: boolean | null;
   text_prompt_max_length?: number | null;
   batch_size_max?: number | null;
+  batch_size_min?: number | null;
   batch_size_default?: number | null;
   batch_size_options?: number[] | null;
   aspect_ratio_options?: string[] | null;
@@ -165,8 +166,14 @@ const mergedImageModel = (
   tauriId: string,
   o: ImageModel | undefined,
 ): ImageModel => {
-  const aspectRatios = knownValues(m.aspect_ratio_options, COMMON_ASPECT_RATIO_VALUES);
-  const resolutions = knownValues(m.resolution_options, COMMON_RESOLUTION_VALUES);
+  const aspectRatios = knownValues(
+    m.aspect_ratio_options,
+    COMMON_ASPECT_RATIO_VALUES,
+  );
+  const resolutions = knownValues(
+    m.resolution_options,
+    COMMON_RESOLUTION_VALUES,
+  );
   const qualityOptions = knownValues(m.quality_options, COMMON_QUALITY_VALUES);
   const fullName = m.full_name ?? o?.fullName ?? m.model;
 
@@ -199,14 +206,18 @@ const mergedImageModel = (
     // fallback where the backend config leaves a field unset.
     maxPromptLength: m.text_prompt_max_length ?? o?.maxPromptLength,
     maxGenerationCount: m.batch_size_max ?? o?.maxGenerationCount ?? 4,
-    defaultGenerationCount: m.batch_size_default ?? o?.defaultGenerationCount ?? 1,
-    predefinedGenerationCounts: m.batch_size_options ?? o?.predefinedGenerationCounts,
+    defaultGenerationCount:
+      m.batch_size_default ?? o?.defaultGenerationCount ?? 1,
+    predefinedGenerationCounts:
+      m.batch_size_options ?? o?.predefinedGenerationCounts,
     canUseImagePrompt: m.image_refs_supported ?? o?.canUseImagePrompt ?? false,
     maxImagePromptCount: m.image_refs_max ?? o?.maxImagePromptCount ?? 1,
     canChangeAspectRatio:
       aspectRatios.length > 0 || (o?.canChangeAspectRatio ?? false),
     aspectRatios:
-      aspectRatios.length > 0 ? (aspectRatios as CommonAspectRatio[]) : o?.aspectRatios,
+      aspectRatios.length > 0
+        ? (aspectRatios as CommonAspectRatio[])
+        : o?.aspectRatios,
     defaultAspectRatio:
       (knownValue(m.aspect_ratio_default, COMMON_ASPECT_RATIO_VALUES) as
         | CommonAspectRatio
@@ -214,13 +225,17 @@ const mergedImageModel = (
     canChangeResolution:
       resolutions.length > 0 || (o?.canChangeResolution ?? false),
     resolutions:
-      resolutions.length > 0 ? (resolutions as CommonResolution[]) : o?.resolutions,
+      resolutions.length > 0
+        ? (resolutions as CommonResolution[])
+        : o?.resolutions,
     defaultResolution:
       (knownValue(m.resolution_default, COMMON_RESOLUTION_VALUES) as
         | CommonResolution
         | undefined) ?? o?.defaultResolution,
     qualityOptions:
-      qualityOptions.length > 0 ? (qualityOptions as CommonQuality[]) : o?.qualityOptions,
+      qualityOptions.length > 0
+        ? (qualityOptions as CommonQuality[])
+        : o?.qualityOptions,
     defaultQuality:
       (knownValue(m.default_quality, COMMON_QUALITY_VALUES) as
         | CommonQuality
@@ -233,7 +248,10 @@ const mergedVideoModel = (
   tauriId: string,
   o: VideoModel | undefined,
 ): VideoModel => {
-  const aspectRatios = knownValues(m.aspect_ratio_options, COMMON_ASPECT_RATIO_VALUES);
+  const aspectRatios = knownValues(
+    m.aspect_ratio_options,
+    COMMON_ASPECT_RATIO_VALUES,
+  );
   const fullName = m.full_name ?? o?.fullName ?? m.model;
 
   return new VideoModel({
@@ -262,9 +280,13 @@ const mergedVideoModel = (
     maxPromptLength: m.text_prompt_max_length ?? o?.maxPromptLength,
     startFrame: m.starting_keyframe_supported ?? o?.startFrame ?? false,
     endFrame: m.ending_keyframe_supported ?? o?.endFrame ?? false,
-    requiresImage: m.starting_keyframe_required ?? o?.requiresImage ?? false,
+    requiresImage:
+      m.text_to_video_supported === false
+        ? true
+        : (m.starting_keyframe_required ?? o?.requiresImage ?? false),
     textToVideoSupported: m.text_to_video_supported ?? o?.textToVideoSupported,
-    generateWithSound: m.show_generate_with_sound_toggle ?? o?.generateWithSound,
+    generateWithSound:
+      m.show_generate_with_sound_toggle ?? o?.generateWithSound,
     durationOptions: m.duration_seconds_options ?? o?.durationOptions,
     minDuration: m.duration_seconds_min ?? o?.minDuration,
     maxDuration: m.duration_seconds_max ?? o?.maxDuration,
@@ -296,24 +318,41 @@ const mergedVideoModel = (
       aspectRatios.length > 0
         ? aspectRatios.map(sizeOptionForAspectRatio)
         : o?.sizeOptions,
+    defaultAspectRatio:
+      knownValue(m.aspect_ratio_default, COMMON_ASPECT_RATIO_VALUES) ??
+      o?.defaultAspectRatio,
     supportsCommonAspectRatio:
       aspectRatios.length > 0 || (o?.supportsCommonAspectRatio ?? false),
+    minGenerationCount: m.batch_size_min ?? o?.minGenerationCount,
+    maxGenerationCount: m.batch_size_max ?? o?.maxGenerationCount,
+    defaultGenerationCount: m.batch_size_default ?? o?.defaultGenerationCount,
+    predefinedGenerationCounts:
+      m.batch_size_options ?? o?.predefinedGenerationCounts,
   });
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-const COMMON_ASPECT_RATIO_VALUES: Set<string> = new Set(Object.values(CommonAspectRatio));
-const COMMON_RESOLUTION_VALUES: Set<string> = new Set(Object.values(CommonResolution));
-const COMMON_QUALITY_VALUES: Set<string> = new Set(Object.values(CommonQuality));
+const COMMON_ASPECT_RATIO_VALUES: Set<string> = new Set(
+  Object.values(CommonAspectRatio),
+);
+const COMMON_RESOLUTION_VALUES: Set<string> = new Set(
+  Object.values(CommonResolution),
+);
+const COMMON_QUALITY_VALUES: Set<string> = new Set(
+  Object.values(CommonQuality),
+);
 
-const knownValues = (values: string[] | null | undefined, known: Set<string>): string[] =>
-  (values ?? []).filter((v) => known.has(v));
+const knownValues = (
+  values: string[] | null | undefined,
+  known: Set<string>,
+): string[] => (values ?? []).filter((v) => known.has(v));
 
 const knownValue = (
   value: string | null | undefined,
   known: Set<string>,
-): string | undefined => (value != null && known.has(value) ? value : undefined);
+): string | undefined =>
+  value != null && known.has(value) ? value : undefined;
 
 /**
  * Derive a video size picker option from a CommonAspectRatio value.
@@ -322,37 +361,101 @@ const knownValue = (
 const sizeOptionForAspectRatio = (value: string): SizeOption => {
   switch (value) {
     case "square":
-      return { tauriValue: value, textLabel: "1:1", icon: SizeIconOption.Square };
+      return {
+        tauriValue: value,
+        textLabel: "1:1",
+        icon: SizeIconOption.Square,
+      };
     case "square_hd":
-      return { tauriValue: value, textLabel: "1:1 HD", icon: SizeIconOption.Square };
+      return {
+        tauriValue: value,
+        textLabel: "1:1 HD",
+        icon: SizeIconOption.Square,
+      };
     case "wide_sixteen_by_nine":
-      return { tauriValue: value, textLabel: "16:9", icon: SizeIconOption.Landscape16x9 };
+      return {
+        tauriValue: value,
+        textLabel: "16:9",
+        icon: SizeIconOption.Landscape16x9,
+      };
     case "tall_nine_by_sixteen":
-      return { tauriValue: value, textLabel: "9:16", icon: SizeIconOption.Portrait9x16 };
+      return {
+        tauriValue: value,
+        textLabel: "9:16",
+        icon: SizeIconOption.Portrait9x16,
+      };
     case "wide_four_by_three":
-      return { tauriValue: value, textLabel: "4:3", icon: SizeIconOption.Standard4x3 };
+      return {
+        tauriValue: value,
+        textLabel: "4:3",
+        icon: SizeIconOption.Standard4x3,
+      };
     case "tall_three_by_four":
-      return { tauriValue: value, textLabel: "3:4", icon: SizeIconOption.Portrait3x4 };
+      return {
+        tauriValue: value,
+        textLabel: "3:4",
+        icon: SizeIconOption.Portrait3x4,
+      };
     case "wide_three_by_two":
-      return { tauriValue: value, textLabel: "3:2", icon: SizeIconOption.Landscape };
+      return {
+        tauriValue: value,
+        textLabel: "3:2",
+        icon: SizeIconOption.Landscape,
+      };
     case "tall_two_by_three":
-      return { tauriValue: value, textLabel: "2:3", icon: SizeIconOption.Portrait };
+      return {
+        tauriValue: value,
+        textLabel: "2:3",
+        icon: SizeIconOption.Portrait,
+      };
     case "wide_five_by_four":
-      return { tauriValue: value, textLabel: "5:4", icon: SizeIconOption.Landscape };
+      return {
+        tauriValue: value,
+        textLabel: "5:4",
+        icon: SizeIconOption.Landscape,
+      };
     case "tall_four_by_five":
-      return { tauriValue: value, textLabel: "4:5", icon: SizeIconOption.Portrait };
+      return {
+        tauriValue: value,
+        textLabel: "4:5",
+        icon: SizeIconOption.Portrait,
+      };
     case "wide_twenty_one_by_nine":
-      return { tauriValue: value, textLabel: "21:9", icon: SizeIconOption.Landscape16x9 };
+      return {
+        tauriValue: value,
+        textLabel: "21:9",
+        icon: SizeIconOption.Landscape16x9,
+      };
     case "tall_nine_by_twenty_one":
-      return { tauriValue: value, textLabel: "9:21", icon: SizeIconOption.Portrait9x16 };
+      return {
+        tauriValue: value,
+        textLabel: "9:21",
+        icon: SizeIconOption.Portrait9x16,
+      };
     case "wide":
-      return { tauriValue: value, textLabel: "Landscape", icon: SizeIconOption.Landscape };
+      return {
+        tauriValue: value,
+        textLabel: "Landscape",
+        icon: SizeIconOption.Landscape,
+      };
     case "tall":
-      return { tauriValue: value, textLabel: "Portrait", icon: SizeIconOption.Portrait };
+      return {
+        tauriValue: value,
+        textLabel: "Portrait",
+        icon: SizeIconOption.Portrait,
+      };
     case "auto":
-      return { tauriValue: value, textLabel: "Auto", icon: SizeIconOption.Square };
+      return {
+        tauriValue: value,
+        textLabel: "Auto",
+        icon: SizeIconOption.Square,
+      };
     default:
-      return { tauriValue: value, textLabel: value, icon: SizeIconOption.Square };
+      return {
+        tauriValue: value,
+        textLabel: value,
+        icon: SizeIconOption.Square,
+      };
   }
 };
 

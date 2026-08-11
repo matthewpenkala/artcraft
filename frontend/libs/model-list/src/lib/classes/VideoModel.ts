@@ -32,6 +32,9 @@ export class VideoModel extends Model {
   // The size options for the model
   readonly sizeOptions: SizeOption[];
 
+  // Default aspect ratio in the same wire-value form as sizeOptions.tauriValue
+  readonly defaultAspectRatio?: string;
+
   // Whether this model supports toggling generation with sound
   readonly generateWithSound?: boolean;
 
@@ -86,6 +89,12 @@ export class VideoModel extends Model {
   // Whether the model supports the system prompt toggle (default true)
   readonly supportsSystemPrompt: boolean;
 
+  // Batch contract advertised by the backend.
+  readonly minGenerationCount: number;
+  readonly maxGenerationCount: number;
+  readonly defaultGenerationCount: number;
+  readonly predefinedGenerationCounts?: number[];
+
   constructor(args: {
     id: string;
     tauriId: string;
@@ -101,6 +110,7 @@ export class VideoModel extends Model {
     textToVideoSupported?: boolean;
     tags?: ModelTag[];
     sizeOptions?: SizeOption[];
+    defaultAspectRatio?: string;
     progressBarTime?: number;
     generateWithSound?: boolean;
     providers?: GenerationProvider[];
@@ -125,6 +135,10 @@ export class VideoModel extends Model {
     supportsSystemPrompt?: boolean;
     supportsCommonAspectRatio?: boolean;
     maxPromptLength?: number;
+    minGenerationCount?: number;
+    maxGenerationCount?: number;
+    defaultGenerationCount?: number;
+    predefinedGenerationCounts?: number[];
   }) {
     super(args);
     this.startFrame = args.startFrame;
@@ -132,6 +146,20 @@ export class VideoModel extends Model {
     this.requiresImage = args.requiresImage;
     this.textToVideoSupported = args.textToVideoSupported ?? true;
     this.sizeOptions = args.sizeOptions ?? [];
+    const defaultAspectRatio =
+      typeof args.defaultAspectRatio === "string" &&
+      args.defaultAspectRatio.length > 0 &&
+      args.defaultAspectRatio === args.defaultAspectRatio.trim()
+        ? args.defaultAspectRatio
+        : undefined;
+    this.defaultAspectRatio =
+      defaultAspectRatio !== undefined &&
+      (this.sizeOptions.length === 0 ||
+        this.sizeOptions.some(
+          ({ tauriValue }) => tauriValue === defaultAspectRatio,
+        ))
+        ? defaultAspectRatio
+        : undefined;
     this.generateWithSound = args.generateWithSound || false;
     this.durationOptions = normalizeVideoDurationOptions(args.durationOptions);
     const minDuration = isValidVideoDuration(args.minDuration)
@@ -188,5 +216,39 @@ export class VideoModel extends Model {
     this.defaultResolution = args.defaultResolution;
     this.supportsSystemPrompt = args.supportsSystemPrompt ?? true;
     this.supportsCommonAspectRatio = args.supportsCommonAspectRatio ?? false;
+    const validCount = (value: unknown): value is number =>
+      typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+    const advertisedCounts = (args.predefinedGenerationCounts ?? [])
+      .filter(validCount)
+      .filter((value, index, values) => values.indexOf(value) === index)
+      .sort((a, b) => a - b);
+    this.minGenerationCount = validCount(args.minGenerationCount)
+      ? args.minGenerationCount
+      : (advertisedCounts[0] ?? 1);
+    this.maxGenerationCount = validCount(args.maxGenerationCount)
+      ? Math.max(this.minGenerationCount, args.maxGenerationCount)
+      : Math.max(
+          this.minGenerationCount,
+          advertisedCounts[advertisedCounts.length - 1] ??
+            this.minGenerationCount,
+        );
+    const supportedCounts = advertisedCounts.filter(
+      (value) =>
+        value >= this.minGenerationCount && value <= this.maxGenerationCount,
+    );
+    this.predefinedGenerationCounts = supportedCounts.length
+      ? supportedCounts
+      : undefined;
+    const clampedDefault = validCount(args.defaultGenerationCount)
+      ? Math.min(
+          Math.max(args.defaultGenerationCount, this.minGenerationCount),
+          this.maxGenerationCount,
+        )
+      : this.minGenerationCount;
+    this.defaultGenerationCount = this.predefinedGenerationCounts?.includes(
+      clampedDefault,
+    )
+      ? clampedDefault
+      : (this.predefinedGenerationCounts?.[0] ?? clampedDefault);
   }
 }

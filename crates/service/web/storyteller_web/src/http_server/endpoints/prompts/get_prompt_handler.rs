@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use actix_web::web::{Json, Path};
@@ -8,9 +10,12 @@ use artcraft_api_defs::prompts::get_prompt::{
 };
 use bucket_paths::legacy::typified_paths::public::media_files::bucket_file_path::MediaFileBucketPath;
 use enums::by_table::prompt_context_items::prompt_context_semantic_type::PromptContextSemanticType;
-use log::{error, warn};
+use log::warn;
 use mysql_queries::queries::prompt_context_items::list_prompt_context_items::list_prompt_context_items;
 use mysql_queries::queries::prompts::get_prompt::get_prompt_from_connection;
+use mysql_queries::queries::tags::filter_visible_media_file_tokens::{
+  filter_visible_media_file_tokens, FilterVisibleMediaFileTokensArgs,
+};
 
 use crate::http_server::common_responses::common_web_error::CommonWebError;
 use crate::http_server::common_responses::media::media_links_builder::MediaLinksBuilder;
@@ -48,6 +53,7 @@ pub async fn get_prompt_handler(
     })?;
 
   let is_moderator = maybe_user_session
+    .as_ref()
     .map(|session| session.can_ban_users)
     .unwrap_or(false);
 
@@ -112,17 +118,46 @@ pub async fn get_prompt_handler(
 
   let media_domain = get_media_domain(&http_request);
 
-  let items_result = list_prompt_context_items(
+  let items = list_prompt_context_items(
     &result.token,
     &mut mysql_connection,
-  ).await;
+  )
+  .await
+  .map_err(|err| {
+    warn!("Error listing prompt context items: {:?}", err);
+    CommonWebError::from(err)
+  })?;
 
-  let items = items_result.unwrap_or_else(|e| {
-    warn!("Error listing prompt context items: {:?}", e);
-    Vec::new()
-  });
+  let candidate_media_tokens = items
+    .iter()
+    .map(|item| item.media_token.clone())
+    .collect::<Vec<_>>();
+  let visible_media_tokens = filter_visible_media_file_tokens(
+    FilterVisibleMediaFileTokensArgs {
+      candidate_tokens: &candidate_media_tokens,
+      requester_user_token: maybe_user_session
+        .as_ref()
+        .map(|session| &session.user_token),
+      requester_is_moderator: is_moderator,
+      mysql_executor: &mut *mysql_connection,
+      phantom: PhantomData,
+    },
+  )
+  .await
+  .map_err(|err| {
+    warn!("Prompt context visibility query error: {:?}", err);
+    CommonWebError::from_error(err)
+  })?
+  .into_iter()
+  .collect::<HashSet<_>>();
+  let context_items_complete = items
+    .iter()
+    .all(|item| visible_media_tokens.contains(&item.media_token));
 
   let items = items.iter().filter_map(|item| {
+    if !visible_media_tokens.contains(&item.media_token) {
+      return None;
+    }
     let bucket_path = MediaFileBucketPath::from_object_hash(
       &item.public_bucket_directory_hash,
       item.maybe_public_bucket_prefix.as_deref(),
@@ -164,6 +199,7 @@ pub async fn get_prompt_handler(
       maybe_generate_audio: result.maybe_generate_audio,
       maybe_duration_seconds: result.maybe_duration_seconds,
       maybe_context_images,
+      context_items_complete,
       maybe_travel_prompt,
       maybe_style_name,
       maybe_inference_duration_millis,

@@ -35,6 +35,7 @@ export type VideoUiState = {
   selectedSize: string;
   duration: number | null;
   resolution: string | null;
+  bitrate: string | null;
   generateWithSound: boolean;
   inputMode: VideoInputMode;
   numVideos: number;
@@ -56,6 +57,11 @@ type CreateVideoState = {
   setRefs: (patch: Partial<VideoRefsState>) => void;
   setPendingRecreate: (payload: RecreatePayload | null) => void;
   consumePendingRecreate: () => RecreatePayload | null;
+  commitPendingRecreate: (
+    payload: RecreatePayload,
+    ui: VideoUiState,
+    refs: VideoRefsState,
+  ) => boolean;
   startBatch: (
     prompt: string,
     modelLabel: string,
@@ -75,6 +81,7 @@ const DEFAULT_UI: VideoUiState = {
   selectedSize: "wide_sixteen_by_nine",
   duration: null,
   resolution: null,
+  bitrate: null,
   generateWithSound: false,
   inputMode: "keyframe",
   numVideos: 1,
@@ -110,6 +117,17 @@ export const useCreateVideoStore = create<CreateVideoState>()(
         const payload = get().pendingRecreate;
         if (payload) set({ pendingRecreate: null });
         return payload;
+      },
+
+      commitPendingRecreate: (payload, ui, refs) => {
+        let committed = false;
+        set((state) => {
+          if (state.pendingRecreate !== payload) return state;
+          reconcileVideoRefUrls(state.refs, refs);
+          committed = true;
+          return { pendingRecreate: null, ui, refs };
+        });
+        return committed;
       },
 
       startBatch: (prompt, modelLabel, batchCount) => {

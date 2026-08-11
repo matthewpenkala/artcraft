@@ -1,30 +1,47 @@
 import toast from "react-hot-toast";
 import {
   FilterMediaClasses,
+  MediaFilesApi,
   PromptsApi,
   downloadUrlToPath,
   pickDownloadDirectory,
   promptDownloadLocationIfNeeded,
 } from "@storyteller/api";
 import type { Prompts } from "@storyteller/api";
-import { DownloadUrl } from "@storyteller/tauri-api";
+import { DownloadUrl, useModelsStore } from "@storyteller/tauri-api";
 import {
   RefImage,
   RefVideo,
   RefAudio,
   usePromptImageStore,
   usePromptVideoStore,
+  type PromptImageRecreateState,
+  type PromptVideoRecreateState,
 } from "@storyteller/ui-promptbox";
 import {
   useClassyModelSelectorStore,
   ModelPage,
 } from "@storyteller/ui-model-selector";
 import {
-  IMAGE_MODELS_BY_ID,
-  VIDEO_MODELS_BY_ID,
   CommonAspectRatio,
+  CommonQuality,
   CommonResolution,
+  getEffectiveVideoReferenceCapabilities,
+  hasVideoDurationConfiguration,
+  type ImageModel,
+  resolveVideoDuration,
+  type VideoModel,
 } from "@storyteller/model-list";
+import {
+  hasNonImageRecreatedReferenceContexts,
+  hydrateRecreatedReferences,
+  prepareMediaReferencesForSubmission,
+  probeMediaDurationFromUrl,
+  resolveTargetModelCount,
+  resolveTargetModelOption,
+  validateRecreatedVideoReferences,
+  type RecreatedReferenceHydrationDependencies,
+} from "@storyteller/common";
 import {
   galleryModalLightboxVisible,
   galleryModalVisibleDuringDrag,
@@ -67,7 +84,10 @@ function extensionForUrl(url: string, mediaClass?: string): string {
 }
 
 /** Download a media file, prompting for a location when configured to. */
-export async function downloadMediaFileToDisk(url: string, mediaClass?: string) {
+export async function downloadMediaFileToDisk(
+  url: string,
+  mediaClass?: string,
+) {
   try {
     const chosenPath = await promptDownloadLocationIfNeeded(url);
     if (chosenPath === null) {
@@ -147,16 +167,35 @@ export async function downloadMediaFilesToFolder(
 }
 
 /** Seed the video page with `url` as the starting image and switch to it. */
-export async function applyMakeVideoFromImage(url: string, mediaToken?: string) {
+export async function applyMakeVideoFromImage(
+  url: string,
+  mediaToken?: string,
+) {
   try {
+    if (!mediaToken || mediaToken !== mediaToken.trim()) {
+      toast.error("This image is not ready to use as a video reference.");
+      return;
+    }
     const referenceImage: RefImage = {
       id: Math.random().toString(36).substring(7),
       url,
-      file: new File([], "library-image"),
-      mediaToken: mediaToken || "",
+      mediaToken,
     };
-    // Update zustand store for Video directly
-    usePromptVideoStore.getState().setReferenceImages([referenceImage]);
+    ++latestDesktopRecreateRequest;
+    const videoState = usePromptVideoStore.getState();
+    videoState.commitRecreate({
+      prompt: "",
+      resolution: videoState.resolution,
+      aspectRatio: videoState.aspectRatio,
+      referenceImages: [referenceImage],
+      endFrameImage: undefined,
+      referenceVideos: [],
+      referenceAudios: [],
+      generateWithSound: videoState.generateWithSound,
+      duration: videoState.duration,
+      inputMode: "keyframe",
+      generationCount: videoState.generationCount,
+    });
     useTabStore.getState().setActiveTab("VIDEO");
     galleryModalVisibleViewMode.value = false;
     galleryModalVisibleDuringDrag.value = false;
@@ -178,165 +217,413 @@ export async function copyShareLink(mediaToken: string): Promise<boolean> {
   }
 }
 
-/**
- * Re-seed the image or video create page from a generation's prompt record
- * (prompt text, reference media, settings, model) and switch to that page.
- */
-export function applyRecreateFromPromptData(data: {
-  promptData: Prompts;
-  mediaClass: string | undefined;
-}) {
-  try {
-    const { promptData, mediaClass: recreateMediaClass } = data;
-    const contextImages = promptData.maybe_context_images || [];
-
-    // Partition context images by semantic type
-    const imgRefs: RefImage[] = [];
-    let endFrameImage: RefImage | undefined;
-    const vidRefs: RefVideo[] = [];
-    const audioRefs: RefAudio[] = [];
-
-    for (const ci of contextImages) {
-      const base = {
-        id: Math.random().toString(36).substring(7),
-        url: ci.media_links.cdn_url,
-        mediaToken: ci.media_token,
-      };
-
-      switch (ci.semantic) {
-        case "vid_end_frame":
-          endFrameImage = { ...base, file: new File([], "recreate-ref") };
-          break;
-        case "vid_ref":
-          vidRefs.push({
-            ...base,
-            file: new File([], "recreate-ref"),
-            duration: 0,
-          });
-          break;
-        case "audioref":
-          audioRefs.push({
-            ...base,
-            file: new File([], "recreate-ref"),
-            duration: 0,
-          });
-          break;
-        default:
-          // imgref, imgref_character, imgref_style, imgref_bg, imgsrc, vid_start_frame, imgmask
-          imgRefs.push({ ...base, file: new File([], "recreate-ref") });
-          break;
-      }
+export type DesktopRecreateTransaction =
+  | {
+      mediaClass: "image";
+      targetModel: ImageModel;
+      usedModelFallback: boolean;
+      excludedReferenceCount: number;
+      state: PromptImageRecreateState;
     }
+  | {
+      mediaClass: "video";
+      targetModel: VideoModel;
+      usedModelFallback: boolean;
+      excludedReferenceCount: number;
+      state: PromptVideoRecreateState;
+    };
 
-    // Determine input mode from generation_mode or context image semantics
-    const hasKeyframeSemantics = contextImages.some(
-      (ci) =>
-        ci.semantic === "vid_start_frame" || ci.semantic === "vid_end_frame",
+let latestDesktopRecreateRequest = 0;
+
+function resolveDesktopRecreateMediaClass(
+  promptData: Prompts,
+  fallback: string | undefined,
+): "image" | "video" | null {
+  const authoritativeClass = promptData.maybe_model_class;
+  if (authoritativeClass === "image" || authoritativeClass === "video") {
+    return authoritativeClass;
+  }
+  if (authoritativeClass) return null;
+  return fallback === "image" || fallback === "video" ? fallback : null;
+}
+
+const createReferenceId = (): string =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+
+const resolutionLabel = (
+  value: string | null | undefined,
+): string | undefined => {
+  if (!value) return undefined;
+  const mapped: Record<string, string> = {
+    half_k: "480p",
+    four_eighty_p: "480p",
+    seven_twenty_p: "720p",
+    one_k: "1080p",
+    ten_eighty_p: "1080p",
+    two_k: "2k",
+    three_k: "3k",
+    four_k: "4k",
+  };
+  return mapped[value] ?? value;
+};
+
+const modelMatches = (
+  model: { id: string; tauriId: string },
+  requested: string,
+): boolean => model.id === requested || model.tauriId === requested;
+
+const selectImageRecreateModel = (
+  models: readonly ImageModel[],
+  requested: string | null,
+): { model: ImageModel; usedFallback: boolean } => {
+  const eligible = models.filter((model) => model.canTextToImage);
+  const restored = requested
+    ? eligible.find((model) => modelMatches(model, requested))
+    : undefined;
+  const model =
+    restored ??
+    eligible.find((candidate) => modelMatches(candidate, "nano_banana_pro")) ??
+    eligible[0];
+  if (!model) throw new Error("No image generation model is available");
+  return { model, usedFallback: !!requested && !restored };
+};
+
+const selectVideoRecreateModel = (
+  models: readonly VideoModel[],
+  requested: string | null,
+): { model: VideoModel; usedFallback: boolean } => {
+  const eligible = models.filter((model) => model.id !== "switch_x");
+  const restored = requested
+    ? eligible.find((model) => modelMatches(model, requested))
+    : undefined;
+  const model =
+    restored ??
+    eligible.find((candidate) => modelMatches(candidate, "seedance_2p0")) ??
+    eligible[0];
+  if (!model) throw new Error("No video generation model is available");
+  return { model, usedFallback: !!requested && !restored };
+};
+
+const inferDesktopVideoInputMode = (
+  promptData: Prompts,
+  referenceCount: number,
+  timedReferenceCount: number,
+): "keyframe" | "reference" => {
+  const contexts = promptData.maybe_context_images ?? [];
+  if (
+    contexts.some(
+      ({ semantic }) =>
+        semantic === "vid_start_frame" || semantic === "vid_end_frame",
+    )
+  ) {
+    return "keyframe";
+  }
+  if (promptData.maybe_generation_mode === "keyframe") return "keyframe";
+  if (promptData.maybe_generation_mode === "reference") return "reference";
+  return referenceCount > 0 || timedReferenceCount > 0
+    ? "reference"
+    : "keyframe";
+};
+
+/** Build and validate the full desktop Recreate state without mutating UI stores. */
+export async function buildDesktopRecreateTransaction(
+  data: {
+    promptData: Prompts;
+    mediaClass: "image" | "video";
+  },
+  models: {
+    imageModels: readonly ImageModel[];
+    videoModels: readonly VideoModel[];
+  },
+  hydration: RecreatedReferenceHydrationDependencies,
+): Promise<DesktopRecreateTransaction> {
+  const { promptData, mediaClass } = data;
+  if (promptData.context_items_complete === false) {
+    throw new Error("Recreate reference context is incomplete");
+  }
+  const contexts = promptData.maybe_context_images ?? [];
+  const hydrationInputs = contexts.map((context) => ({
+    semantic: context.semantic,
+    mediaToken: context.media_token,
+    url: context.media_links.cdn_url,
+  }));
+
+  if (
+    mediaClass === "image" &&
+    hasNonImageRecreatedReferenceContexts(hydrationInputs)
+  ) {
+    throw new Error("Image Recreate contains non-image reference media");
+  }
+
+  const hydrated = await hydrateRecreatedReferences(
+    hydrationInputs,
+    hydration,
+    promptData.maybe_positive_prompt ?? "",
+  );
+  const asImage = (reference: {
+    mediaToken: string;
+    url: string;
+  }): RefImage => ({
+    id: createReferenceId(),
+    url: reference.url,
+    mediaToken: reference.mediaToken,
+  });
+  const referenceImages = hydrated.referenceImages.map(asImage);
+
+  if (mediaClass === "image") {
+    const { model, usedFallback } = selectImageRecreateModel(
+      models.imageModels,
+      promptData.maybe_model_type,
     );
-    const inputMode: "keyframe" | "reference" =
-      promptData.maybe_generation_mode === "keyframe" || hasKeyframeSemantics
-        ? "keyframe"
-        : promptData.maybe_generation_mode === "reference"
-          ? "reference"
-          : imgRefs.length > 0
-            ? "reference"
-            : "keyframe";
-
-    const modelStore = useClassyModelSelectorStore.getState();
-
-    if (recreateMediaClass === "video") {
-      const videoStore = usePromptVideoStore.getState();
-
-      // Set model first so the UI syncs sizeOptions / durationOptions
-      const videoModel = promptData.maybe_model_type
-        ? VIDEO_MODELS_BY_ID.get(promptData.maybe_model_type)
-        : undefined;
-      if (videoModel) {
-        modelStore.setSelectedModel(ModelPage.ImageToVideo, videoModel);
-      }
-
-      if (promptData.maybe_positive_prompt) {
-        videoStore.setPrompt(promptData.maybe_positive_prompt);
-      }
-      if (imgRefs.length > 0) videoStore.setReferenceImages(imgRefs);
-      if (endFrameImage) videoStore.setEndFrameImage(endFrameImage);
-      if (vidRefs.length > 0) videoStore.setReferenceVideos(vidRefs);
-      if (audioRefs.length > 0) videoStore.setReferenceAudios(audioRefs);
-      if (promptData.maybe_generate_audio !== null) {
-        videoStore.setGenerateWithSound(promptData.maybe_generate_audio);
-      }
-      if (promptData.maybe_duration_seconds !== null) {
-        videoStore.setDuration(promptData.maybe_duration_seconds);
-      }
-
-      // Map API aspect ratio (tauriValue like "wide_sixteen_by_nine") → textLabel (like "16:9")
-      if (promptData.maybe_aspect_ratio && videoModel?.sizeOptions) {
-        const match = videoModel.sizeOptions.find(
-          (opt) => opt.tauriValue === promptData.maybe_aspect_ratio,
-        );
-        if (match) {
-          videoStore.setAspectRatio(match.textLabel);
-        }
-      }
-
-      // Map API resolution (like "one_k") → video store format (like "1080p")
-      if (promptData.maybe_resolution && videoModel?.resolutionOptions) {
-        const resolutionMap: Record<string, string> = {
-          one_k: "1080p",
-          two_k: "2k",
-          three_k: "3k",
-          four_k: "4k",
-        };
-        const mapped = resolutionMap[promptData.maybe_resolution];
-        if (mapped && videoModel.resolutionOptions.includes(mapped)) {
-          videoStore.setResolution(mapped);
-        }
-      }
-
-      videoStore.setInputMode(inputMode);
-      useTabStore.getState().setActiveTab("VIDEO");
-    } else {
-      // Default to image
-      const imageStore = usePromptImageStore.getState();
-
-      if (promptData.maybe_positive_prompt) {
-        imageStore.setPrompt(promptData.maybe_positive_prompt);
-      }
-      if (imgRefs.length > 0) imageStore.setReferenceImages(imgRefs);
-      if (promptData.maybe_aspect_ratio) {
-        imageStore.setCommonAspectRatio(
-          promptData.maybe_aspect_ratio as CommonAspectRatio,
-        );
-      }
-      if (promptData.maybe_resolution) {
-        imageStore.setCommonResolution(
-          promptData.maybe_resolution as CommonResolution,
-        );
-      }
-
-      if (promptData.maybe_model_type) {
-        const model = IMAGE_MODELS_BY_ID.get(promptData.maybe_model_type);
-        if (model) modelStore.setSelectedModel(ModelPage.TextToImage, model);
-      }
-      useTabStore.getState().setActiveTab("IMAGE");
+    const submitted = prepareMediaReferencesForSubmission(referenceImages);
+    if (!submitted) throw new Error("Image Recreate contains invalid tokens");
+    if (
+      submitted.length > 0 &&
+      (!model.canUseImagePrompt || submitted.length > model.maxImagePromptCount)
+    ) {
+      throw new Error("Image references conflict with the target model");
     }
 
-    galleryModalVisibleViewMode.value = false;
-    galleryModalVisibleDuringDrag.value = false;
-    galleryModalLightboxVisible.value = false;
-  } catch (e) {
-    // no-op
+    return {
+      mediaClass,
+      targetModel: model,
+      usedModelFallback: usedFallback,
+      excludedReferenceCount: hydrated.excludedReferenceCount,
+      state: {
+        prompt: promptData.maybe_positive_prompt ?? "",
+        referenceImages: submitted,
+        generationCount: resolveTargetModelCount(
+          promptData.maybe_batch_count,
+          model.predefinedGenerationCounts,
+          1,
+          model.maxGenerationCount,
+          model.defaultGenerationCount,
+        ),
+        commonAspectRatio: resolveTargetModelOption(
+          promptData.maybe_aspect_ratio,
+          model.aspectRatios,
+          model.defaultAspectRatio,
+        ) as CommonAspectRatio | undefined,
+        commonResolution: resolveTargetModelOption(
+          promptData.maybe_resolution,
+          model.resolutions,
+          model.defaultResolution,
+        ) as CommonResolution | undefined,
+        commonQuality: resolveTargetModelOption(
+          undefined,
+          model.qualityOptions,
+          model.defaultQuality,
+        ) as CommonQuality | undefined,
+      },
+    };
+  }
+
+  const { model, usedFallback } = selectVideoRecreateModel(
+    models.videoModels,
+    promptData.maybe_model_type,
+  );
+  const referenceVideos: RefVideo[] = hydrated.referenceVideos.map(
+    (reference) => ({ ...asImage(reference), duration: reference.duration }),
+  );
+  const referenceAudios: RefAudio[] = hydrated.referenceAudios.map(
+    (reference) => ({ ...asImage(reference), duration: reference.duration }),
+  );
+  const endFrames = prepareMediaReferencesForSubmission(
+    hydrated.endFrameImage ? [asImage(hydrated.endFrameImage)] : [],
+  );
+  const submittedImages = prepareMediaReferencesForSubmission(referenceImages);
+  const submittedVideos = prepareMediaReferencesForSubmission(referenceVideos);
+  const submittedAudios = prepareMediaReferencesForSubmission(referenceAudios);
+  if (!endFrames || !submittedImages || !submittedVideos || !submittedAudios) {
+    throw new Error("Video Recreate contains invalid reference tokens");
+  }
+
+  const inputMode = inferDesktopVideoInputMode(
+    promptData,
+    submittedImages.length,
+    submittedVideos.length + submittedAudios.length,
+  );
+  const capabilities = getEffectiveVideoReferenceCapabilities(model);
+  const requiresStartFrame =
+    model.requiresImage || model.textToVideoSupported === false;
+  const referenceStatus = validateRecreatedVideoReferences(
+    {
+      imageCount: submittedImages.length,
+      hasEndFrame: endFrames.length > 0,
+      videoDurations: submittedVideos.map(({ duration }) => duration),
+      audioDurations: submittedAudios.map(({ duration }) => duration),
+    },
+    inputMode,
+    { ...capabilities, requiresStartFrame },
+  );
+  if (referenceStatus !== "valid") {
+    throw new Error(
+      `Video references conflict with target model: ${referenceStatus}`,
+    );
+  }
+
+  const duration = resolveVideoDuration(
+    model,
+    promptData.maybe_duration_seconds,
+    {
+      imageCount: submittedImages.length,
+      hasEndFrameImage: endFrames.length > 0,
+      videoCount: submittedVideos.length,
+      audioCount: submittedAudios.length,
+    },
+  );
+  if (duration === null && hasVideoDurationConfiguration(model)) {
+    throw new Error("Target model has no valid duration for these references");
+  }
+
+  const aspectValues = model.sizeOptions.map(({ tauriValue }) => tauriValue);
+  const aspectValue = resolveTargetModelOption(
+    promptData.maybe_aspect_ratio,
+    aspectValues,
+    model.defaultAspectRatio ?? aspectValues[0],
+  );
+  const aspectRatio = aspectValue
+    ? (model.sizeOptions.find(({ tauriValue }) => tauriValue === aspectValue)
+        ?.textLabel ?? null)
+    : null;
+  const restoredResolution = resolutionLabel(promptData.maybe_resolution);
+
+  return {
+    mediaClass,
+    targetModel: model,
+    usedModelFallback: usedFallback,
+    excludedReferenceCount: hydrated.excludedReferenceCount,
+    state: {
+      prompt: promptData.maybe_positive_prompt ?? "",
+      referenceImages: submittedImages,
+      endFrameImage: endFrames[0],
+      referenceVideos: submittedVideos,
+      referenceAudios: submittedAudios,
+      inputMode,
+      duration,
+      generateWithSound: model.generateWithSound
+        ? (promptData.maybe_generate_audio ?? false)
+        : false,
+      aspectRatio,
+      resolution:
+        resolveTargetModelOption(
+          restoredResolution,
+          model.resolutionOptions,
+          model.defaultResolution,
+        ) ?? "720p",
+      generationCount: resolveTargetModelCount(
+        promptData.maybe_batch_count,
+        model.predefinedGenerationCounts,
+        model.minGenerationCount,
+        model.maxGenerationCount,
+        model.defaultGenerationCount,
+      ),
+    },
+  };
+}
+
+const defaultDesktopHydration: RecreatedReferenceHydrationDependencies = {
+  loadDurationMillis: async (mediaToken) => {
+    const response = await new MediaFilesApi().GetMediaFileByToken({
+      mediaFileToken: mediaToken,
+    });
+    return response.success ? response.data?.maybe_duration_millis : null;
+  },
+  probeVideoDuration: (url) => probeMediaDurationFromUrl("video", url),
+  probeAudioDuration: (url) => probeMediaDurationFromUrl("audio", url),
+};
+
+const closeDesktopGallery = () => {
+  galleryModalVisibleViewMode.value = false;
+  galleryModalVisibleDuringDrag.value = false;
+  galleryModalLightboxVisible.value = false;
+};
+
+async function applyDesktopRecreate(
+  data: { promptData: Prompts; mediaClass: "image" | "video" },
+  requestId: number,
+): Promise<void> {
+  const modelsState = useModelsStore.getState();
+  if (!modelsState.loaded || modelsState.isLoading) {
+    await modelsState.loadModelsFromBackend();
+  }
+  if (requestId !== latestDesktopRecreateRequest) return;
+
+  const liveModels = useModelsStore.getState();
+  const transaction = await buildDesktopRecreateTransaction(
+    data,
+    liveModels,
+    defaultDesktopHydration,
+  );
+  if (requestId !== latestDesktopRecreateRequest) return;
+
+  const modelStore = useClassyModelSelectorStore.getState();
+  if (transaction.mediaClass === "video") {
+    modelStore.setSelectedModel(
+      ModelPage.ImageToVideo,
+      transaction.targetModel,
+    );
+    usePromptVideoStore.getState().commitRecreate(transaction.state);
+    useTabStore.getState().setActiveTab("VIDEO");
+  } else {
+    modelStore.setSelectedModel(ModelPage.TextToImage, transaction.targetModel);
+    usePromptImageStore.getState().commitRecreate(transaction.state);
+    useTabStore.getState().setActiveTab("IMAGE");
+  }
+  closeDesktopGallery();
+
+  if (transaction.usedModelFallback) {
+    toast.error(
+      `The original model is unavailable. Recreate uses ${transaction.targetModel.selectorName}.`,
+    );
+  }
+  if (transaction.excludedReferenceCount > 0) {
+    const count = transaction.excludedReferenceCount;
+    toast.error(
+      `${count} unreadable reference ${count === 1 ? "file was" : "files were"} excluded`,
+    );
   }
 }
 
 /**
- * Recreate from a prompt token: resolve the prompt record (shared cache
- * first, then the API), then seed the create page from it.
+ * Re-seed the image or video create page from a generation's prompt record.
+ * Every asynchronous dependency resolves and validates before one synchronous
+ * commit; a newer Recreate request invalidates this one.
  */
+export async function applyRecreateFromPromptData(data: {
+  promptData: Prompts;
+  mediaClass: string | undefined;
+}): Promise<void> {
+  const requestId = ++latestDesktopRecreateRequest;
+  const mediaClass = resolveDesktopRecreateMediaClass(
+    data.promptData,
+    data.mediaClass,
+  );
+  if (!mediaClass) {
+    toast.error("Recreate is not supported for this media type.");
+    return;
+  }
+  try {
+    await applyDesktopRecreate(
+      { promptData: data.promptData, mediaClass },
+      requestId,
+    );
+  } catch (error) {
+    if (requestId === latestDesktopRecreateRequest) {
+      console.error("Desktop Recreate failed", error);
+      toast.error("Could not restore the original generation settings.");
+    }
+  }
+}
+
+/** Resolve one prompt record (cache first, then batch API) and replay it. */
 export async function applyRecreateFromPromptToken(
   promptToken: string,
   mediaClass: "image" | "video",
-) {
+): Promise<void> {
+  const requestId = ++latestDesktopRecreateRequest;
   let promptData: Prompts | undefined = getCachedPrompt(promptToken);
   if (!promptData) {
     try {
@@ -348,9 +635,28 @@ export async function applyRecreateFromPromptToken(
       // handled below
     }
   }
+  if (requestId !== latestDesktopRecreateRequest) return;
   if (!promptData) {
     toast.error("Could not load the original prompt.");
     return;
   }
-  applyRecreateFromPromptData({ promptData, mediaClass });
+  const resolvedMediaClass = resolveDesktopRecreateMediaClass(
+    promptData,
+    mediaClass,
+  );
+  if (!resolvedMediaClass) {
+    toast.error("Recreate is not supported for this media type.");
+    return;
+  }
+  try {
+    await applyDesktopRecreate(
+      { promptData, mediaClass: resolvedMediaClass },
+      requestId,
+    );
+  } catch (error) {
+    if (requestId === latestDesktopRecreateRequest) {
+      console.error("Desktop Recreate failed", error);
+      toast.error("Could not restore the original generation settings.");
+    }
+  }
 }

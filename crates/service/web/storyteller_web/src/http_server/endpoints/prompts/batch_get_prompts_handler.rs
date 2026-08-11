@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use actix_web::web::Json;
@@ -13,6 +14,9 @@ use enums::by_table::prompt_context_items::prompt_context_semantic_type::PromptC
 use log::warn;
 use mysql_queries::queries::prompt_context_items::batch_list_prompt_context_items::batch_list_prompt_context_items;
 use mysql_queries::queries::prompts::batch_get_prompts::batch_get_prompts;
+use mysql_queries::queries::tags::filter_visible_media_file_tokens::{
+  filter_visible_media_file_tokens, FilterVisibleMediaFileTokensArgs,
+};
 use tokens::tokens::prompts::PromptToken;
 
 use crate::http_server::common_responses::common_web_error::CommonWebError;
@@ -21,6 +25,24 @@ use crate::http_server::endpoints::media_files::helpers::get_media_domain::get_m
 use crate::state::server_state::ServerState;
 
 const MAX_BATCH_SIZE: usize = 100;
+
+// Batch and single-prompt reads must expose the same replayable context set.
+// Keep this exhaustive so adding a new semantic type forces an explicit
+// decision here instead of silently dropping it from Recreate consumers.
+fn include_prompt_context(semantic: PromptContextSemanticType) -> bool {
+  match semantic {
+    PromptContextSemanticType::VidStartFrame
+    | PromptContextSemanticType::VidEndFrame
+    | PromptContextSemanticType::VidRef
+    | PromptContextSemanticType::Imgsrc
+    | PromptContextSemanticType::Imgmask
+    | PromptContextSemanticType::Imgref
+    | PromptContextSemanticType::ImgrefCharacter
+    | PromptContextSemanticType::ImgrefStyle
+    | PromptContextSemanticType::ImgrefBg
+    | PromptContextSemanticType::Audioref => true,
+  }
+}
 
 /// Batch get details on multiple prompts.
 ///
@@ -65,6 +87,15 @@ pub async fn batch_get_prompts_handler(
 
   let mut mysql_connection = server_state.mysql_pool.acquire().await?;
 
+  let maybe_user_session = server_state
+    .session_checker
+    .maybe_get_user_session_from_connection(&http_request, &mut mysql_connection)
+    .await
+    .map_err(|err| {
+      warn!("Session checker error: {:?}", err);
+      CommonWebError::from(err)
+    })?;
+
   // Batch query: fetch all prompts in one query
   let results = batch_get_prompts(&unique_tokens, &mut mysql_connection)
     .await
@@ -81,22 +112,49 @@ pub async fn batch_get_prompts_handler(
       CommonWebError::from_error(err)
     })?;
 
+  let candidate_media_tokens = all_context_items
+    .iter()
+    .map(|item| item.media_token.clone())
+    .collect::<Vec<_>>();
+  let visible_media_tokens = filter_visible_media_file_tokens(
+    FilterVisibleMediaFileTokensArgs {
+      candidate_tokens: &candidate_media_tokens,
+      requester_user_token: maybe_user_session
+        .as_ref()
+        .map(|session| &session.user_token),
+      requester_is_moderator: maybe_user_session
+        .as_ref()
+        .map(|session| session.can_ban_users)
+        .unwrap_or(false),
+      mysql_executor: &mut *mysql_connection,
+      phantom: PhantomData,
+    },
+  )
+  .await
+  .map_err(|err| {
+    warn!("Prompt context visibility query error: {:?}", err);
+    CommonWebError::from_error(err)
+  })?
+  .into_iter()
+  .collect::<HashSet<_>>();
+
+  let incomplete_prompt_tokens = all_context_items
+    .iter()
+    .filter(|item| !visible_media_tokens.contains(&item.media_token))
+    .map(|item| item.prompt_token.as_str().to_string())
+    .collect::<HashSet<_>>();
+
   let media_domain = get_media_domain(&http_request);
 
   // Group context items by prompt token
   let mut context_items_map: HashMap<String, Vec<GetPromptImageContextItem>> = HashMap::new();
 
   for item in all_context_items {
-    // Filter to only image-like context types
-    match item.context_semantic_type {
-      PromptContextSemanticType::VidStartFrame
-      | PromptContextSemanticType::VidEndFrame
-      | PromptContextSemanticType::Imgref
-      | PromptContextSemanticType::ImgrefCharacter
-      | PromptContextSemanticType::ImgrefStyle
-      | PromptContextSemanticType::ImgrefBg
-      | PromptContextSemanticType::VidRef => {} // Include
-      _ => continue, // Ignore
+    if !visible_media_tokens.contains(&item.media_token) {
+      continue;
+    }
+    if !include_prompt_context(item.context_semantic_type) {
+      continue;
     }
 
     let bucket_path = MediaFileBucketPath::from_object_hash(
@@ -125,6 +183,8 @@ pub async fn batch_get_prompts_handler(
   let prompts: Vec<BatchPromptInfo> = results
     .into_iter()
     .map(|result| {
+      let context_items_complete = !incomplete_prompt_tokens
+        .contains(result.token.as_str());
       let maybe_context_images = context_items_map
         .remove(result.token.as_str())
         .filter(|items| !items.is_empty());
@@ -144,6 +204,7 @@ pub async fn batch_get_prompts_handler(
         maybe_generate_audio: result.maybe_generate_audio,
         maybe_duration_seconds: result.maybe_duration_seconds,
         maybe_context_images,
+        context_items_complete,
         created_at: result.created_at,
       }
     })
@@ -153,4 +214,24 @@ pub async fn batch_get_prompts_handler(
     success: true,
     prompts,
   }))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn batch_replay_includes_every_current_prompt_context_semantic() {
+    for semantic in PromptContextSemanticType::all_variants() {
+      assert!(
+        include_prompt_context(semantic),
+        "batch prompt lookup dropped replay context {:?}",
+        semantic,
+      );
+    }
+
+    assert!(include_prompt_context(PromptContextSemanticType::Audioref));
+    assert!(include_prompt_context(PromptContextSemanticType::Imgsrc));
+    assert!(include_prompt_context(PromptContextSemanticType::Imgmask));
+  }
 }

@@ -5,10 +5,7 @@ import type { OmniGenImageModelInfo } from "@storyteller/api";
 import { PopoverMenu, type PopoverItem } from "@storyteller/ui-popover";
 import { Tooltip } from "@storyteller/ui-tooltip";
 import { GalleryModal, type GalleryItem } from "@storyteller/ui-gallery-modal";
-import {
-  PromptBox,
-  type RefImage,
-} from "../../components/prompt-box";
+import { PromptBox, type RefImage } from "../../components/prompt-box";
 import {
   GenerationGalleryGrid,
   useGalleryData,
@@ -30,6 +27,11 @@ import { QualityPicker } from "./components/QualityPicker";
 import { useImageCostEstimate } from "../../lib/cost-estimate-api";
 import { useOmniGenImageModels } from "@storyteller/omni-gen";
 import { getCreatorIconPathForModelId } from "@storyteller/model-list";
+import {
+  prepareMediaReferencesForSubmission,
+  resolveTargetModelCount,
+  resolveTargetModelOption,
+} from "@storyteller/common";
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -89,33 +91,64 @@ export default function CreateImage() {
 
   const prompt = ui.prompt;
   const setPrompt = useCallback((v: string) => setUi({ prompt: v }), [setUi]);
-  const aspectRatio = ui.aspectRatio;
+  const aspectRatio =
+    resolveTargetModelOption(
+      ui.aspectRatio,
+      selectedModel?.aspect_ratio_options,
+      selectedModel?.aspect_ratio_default,
+    ) ?? ui.aspectRatio;
   const setAspectRatio = useCallback(
     (v: string) => setUi({ aspectRatio: v }),
     [setUi],
   );
-  const numImages = ui.numImages;
+  const numImages = selectedModel
+    ? resolveTargetModelCount(
+        ui.numImages,
+        selectedModel.batch_size_options,
+        selectedModel.batch_size_min,
+        selectedModel.batch_size_max,
+        selectedModel.batch_size_default,
+      )
+    : ui.numImages;
   const setNumImages = useCallback(
     (v: number) => setUi({ numImages: v }),
     [setUi],
   );
-  const resolution = ui.resolution;
+  const resolution = resolveTargetModelOption(
+    ui.resolution,
+    selectedModel?.resolution_options,
+    selectedModel?.resolution_default,
+  );
   const setResolution = useCallback(
     (v: string | undefined) => setUi({ resolution: v }),
     [setUi],
   );
-  const quality = ui.quality;
+  const quality = resolveTargetModelOption(
+    ui.quality,
+    selectedModel?.quality_options,
+    selectedModel?.default_quality,
+  );
   const setQuality = useCallback(
     (v: string | undefined) => setUi({ quality: v }),
     [setUi],
   );
 
   const [isGenerating, setIsGenerating] = useState(false);
-  const referenceImages = useCreateImageStore((s) => s.referenceImages);
+  const storedReferenceImages = useCreateImageStore((s) => s.referenceImages);
   const setReferenceImages = useCreateImageStore((s) => s.setReferenceImages);
   const [isImagePickerOpen, setIsImagePickerOpen] = useState(false);
   const [pickerSelectedIds, setPickerSelectedIds] = useState<string[]>([]);
-  const maxImageRefs = selectedModel?.image_refs_max ?? 6;
+  const maxImageRefs =
+    selectedModel?.image_refs_supported === true
+      ? (selectedModel.image_refs_max ?? Number.MAX_SAFE_INTEGER)
+      : 0;
+  const referenceImages = useMemo(
+    () =>
+      selectedModel?.image_refs_supported === true
+        ? storedReferenceImages.slice(0, maxImageRefs)
+        : [],
+    [selectedModel?.image_refs_supported, storedReferenceImages, maxImageRefs],
+  );
   const imagePickerMax = Math.max(1, maxImageRefs - referenceImages.length);
 
   useEffect(() => {
@@ -178,6 +211,7 @@ export default function CreateImage() {
     quality: hasQualityOptions ? quality : undefined,
     numImages,
     hasReferenceImages: referenceImages.length > 0,
+    imageMediaTokenCount: referenceImages.length,
   });
 
   const modelItems = useMemo(
@@ -202,33 +236,66 @@ export default function CreateImage() {
   // the restored prompt/settings may not be valid for it. Verified in its own
   // effect because the model list may still be loading when the recreate
   // payload is consumed.
-  const [recreateModelIdToVerify, setRecreateModelIdToVerify] = useState<
-    string | null
-  >(null);
+  const pendingRecreate = useCreateImageStore((s) => s.pendingRecreate);
   useEffect(() => {
-    if (!recreateModelIdToVerify || apiModels.length === 0) return;
-    if (!apiModels.some((m) => m.model === recreateModelIdToVerify)) {
+    if (!pendingRecreate || apiModels.length === 0) return;
+    const payload = pendingRecreate;
+    if (useCreateImageStore.getState().pendingRecreate !== payload) return;
+    const requestedModel = payload.modelId
+      ? apiModels.find((model) => model.model === payload.modelId)
+      : undefined;
+    const targetModel =
+      requestedModel ??
+      apiModels.find((model) => model.model === DEFAULT_MODEL_ID) ??
+      apiModels[0];
+    if (!targetModel) return;
+    const prepared = prepareMediaReferencesForSubmission(
+      payload.referenceImages,
+    );
+    const targetMax =
+      targetModel.image_refs_supported === true
+        ? (targetModel.image_refs_max ?? Number.MAX_SAFE_INTEGER)
+        : 0;
+    if (!prepared || prepared.length > targetMax) {
+      const store = useCreateImageStore.getState();
+      if (store.pendingRecreate !== payload) return;
+      store.setPendingRecreate(null);
+      toast.error("Recreate references are incompatible with this model");
+      return;
+    }
+    const committed = useCreateImageStore.getState().commitPendingRecreate(
+      payload,
+      {
+        selectedModelId: targetModel.model,
+        prompt: payload.prompt,
+        aspectRatio:
+          resolveTargetModelOption(
+            payload.aspectRatio,
+            targetModel.aspect_ratio_options,
+            targetModel.aspect_ratio_default,
+          ) ?? "square",
+        numImages: resolveTargetModelCount(
+          payload.generationCount,
+          targetModel.batch_size_options,
+          targetModel.batch_size_min,
+          targetModel.batch_size_max,
+          targetModel.batch_size_default,
+        ),
+        resolution: resolveTargetModelOption(
+          payload.resolution,
+          targetModel.resolution_options,
+          targetModel.resolution_default,
+        ),
+        quality: targetModel.default_quality ?? undefined,
+      },
+      prepared,
+    );
+    if (committed && payload.modelId && !requestedModel) {
       toast.error(
         "The model used for this generation isn't available anymore. Using the default model instead.",
       );
     }
-    setRecreateModelIdToVerify(null);
-  }, [recreateModelIdToVerify, apiModels]);
-
-  const pendingRecreate = useCreateImageStore((s) => s.pendingRecreate);
-  useEffect(() => {
-    if (!pendingRecreate) return;
-    const payload = useCreateImageStore.getState().consumePendingRecreate();
-    if (!payload) return;
-    setReferenceImages(payload.referenceImages);
-    setUi({
-      prompt: payload.prompt,
-      ...(payload.aspectRatio ? { aspectRatio: payload.aspectRatio } : {}),
-      ...(payload.resolution ? { resolution: payload.resolution } : {}),
-      ...(payload.modelId ? { selectedModelId: payload.modelId } : {}),
-    });
-    if (payload.modelId) setRecreateModelIdToVerify(payload.modelId);
-  }, [pendingRecreate, setUi]);
+  }, [pendingRecreate, apiModels]);
 
   // Resume polling for pending batches
   useEffect(() => {
@@ -289,7 +356,6 @@ export default function CreateImage() {
         .map((item) => ({
           id: Math.random().toString(36).substring(7),
           url: item.thumbnail || item.fullImage || "",
-          file: new File([], "library-image"),
           mediaToken: item.id,
         }));
       setReferenceImages([...referenceImages, ...newImages]);
@@ -324,6 +390,16 @@ export default function CreateImage() {
       return;
     }
 
+    const submittedReferences = prepareMediaReferencesForSubmission(
+      selectedModel.image_refs_supported === true
+        ? referenceImages.slice(0, maxImageRefs)
+        : [],
+    );
+    if (!submittedReferences) {
+      toast.error("Every sent reference image must finish uploading");
+      return;
+    }
+
     setIsGenerating(true);
     const batchId = startBatch(
       prompt,
@@ -333,9 +409,7 @@ export default function CreateImage() {
 
     try {
       const imageMediaTokens = selectedModel.image_refs_supported
-        ? referenceImages
-            .map((img) => img.mediaToken)
-            .filter((t) => t.length > 0)
+        ? submittedReferences.map((image) => image.mediaToken!)
         : undefined;
 
       const result = await enqueueImageGeneration({
@@ -393,6 +467,7 @@ export default function CreateImage() {
     isGenerating,
     selectedModel,
     maxPromptLength,
+    maxImageRefs,
     numImages,
     aspectRatio,
     resolution,
@@ -460,7 +535,12 @@ export default function CreateImage() {
             onReferenceImagesChange={setReferenceImages}
             onPickFromLibrary={() => setIsImagePickerOpen(true)}
             modelSelector={
-              <Tooltip content="Model" position="top" className="z-50" closeOnClick>
+              <Tooltip
+                content="Model"
+                position="top"
+                className="z-50"
+                closeOnClick
+              >
                 <PopoverMenu
                   items={modelItems}
                   onSelect={handleModelChange}
@@ -469,7 +549,9 @@ export default function CreateImage() {
                   showIconsInList
                   triggerIcon={
                     <img
-                      src={getCreatorIconPathForModelId(selectedModel?.model ?? "")}
+                      src={getCreatorIconPathForModelId(
+                        selectedModel?.model ?? "",
+                      )}
                       alt=""
                       className="h-4 w-4 icon-auto-contrast"
                     />
@@ -504,9 +586,7 @@ export default function CreateImage() {
                 {hasQualityOptions && selectedModel && (
                   <QualityPicker
                     qualityOptions={selectedModel.quality_options ?? []}
-                    defaultQuality={
-                      selectedModel.default_quality ?? undefined
-                    }
+                    defaultQuality={selectedModel.default_quality ?? undefined}
                     currentQuality={quality}
                     handleQualitySelect={setQuality}
                   />

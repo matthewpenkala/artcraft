@@ -43,6 +43,46 @@ const overlayReferenceModel = () =>
   });
 
 describe("buildVideoModelsFromListing duration capabilities", () => {
+  it("preserves a listed aspect-ratio default instead of selecting the first option", () => {
+    const [model] = buildVideoModelsFromListing(
+      [],
+      [
+        {
+          model: "seedance_like_video",
+          aspect_ratio_options: [
+            "wide_twenty_one_by_nine",
+            "wide_sixteen_by_nine",
+          ],
+          aspect_ratio_default: "wide_sixteen_by_nine",
+        },
+      ],
+      ["seedance_like_video"],
+    );
+
+    expect(model.sizeOptions.map(({ textLabel }) => textLabel)).toEqual([
+      "21:9",
+      "16:9",
+    ]);
+    expect(model.defaultAspectRatio).toBe("wide_sixteen_by_nine");
+  });
+
+  it("derives a required start frame when text-to-video is disabled", () => {
+    const [model] = buildVideoModelsFromListing(
+      [],
+      [
+        {
+          model: "fictional_image_only_video",
+          starting_keyframe_supported: true,
+          text_to_video_supported: false,
+        },
+      ],
+      ["fictional_image_only_video"],
+    );
+
+    expect(model.requiresImage).toBe(true);
+    expect(model.textToVideoSupported).toBe(false);
+  });
+
   it("hydrates range, image cap, options, and default without materializing the range", () => {
     const [model] = buildVideoModelsFromListing(
       [],
@@ -286,4 +326,49 @@ describe("buildVideoModelsFromListing reference capabilities", () => {
       });
     },
   );
+});
+
+describe("buildVideoModelsFromListing batch capabilities", () => {
+  it("derives missing bounds from advertised discrete counts", () => {
+    const [model] = buildVideoModelsFromListing(
+      [],
+      [
+        {
+          model: "discrete_batch_video",
+          batch_size_options: [1, 2, 4],
+          batch_size_default: 2,
+        },
+      ],
+      ["discrete_batch_video"],
+    );
+
+    expect(model).toMatchObject({
+      minGenerationCount: 1,
+      maxGenerationCount: 4,
+      defaultGenerationCount: 2,
+      predefinedGenerationCounts: [1, 2, 4],
+    });
+  });
+
+  it("keeps a derived maximum and default at or above an explicit minimum", () => {
+    const [model] = buildVideoModelsFromListing(
+      [],
+      [
+        {
+          model: "partial_batch_video",
+          batch_size_min: 4,
+          batch_size_options: [1, 2],
+          batch_size_default: 2,
+        },
+      ],
+      ["partial_batch_video"],
+    );
+
+    expect(model).toMatchObject({
+      minGenerationCount: 4,
+      maxGenerationCount: 4,
+      defaultGenerationCount: 4,
+      predefinedGenerationCounts: undefined,
+    });
+  });
 });

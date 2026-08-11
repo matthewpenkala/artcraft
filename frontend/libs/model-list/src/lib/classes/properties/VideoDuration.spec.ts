@@ -169,6 +169,17 @@ describe("image-specific video duration cap", () => {
     ).toBe(15);
   });
 
+  it("keeps 15 seconds in an empty reference mode and caps only after an image is actually sent", () => {
+    expect(
+      resolveVideoDuration(rangeModel, 15, {
+        imageCount: 0,
+        videoCount: 0,
+        audioCount: 0,
+      }),
+    ).toBe(15);
+    expect(resolveVideoDuration(rangeModel, 15, { imageCount: 1 })).toBe(10);
+  });
+
   it("filters discrete options above the image cap", () => {
     const model = {
       durationOptions: [5, 10, 15],

@@ -13,6 +13,8 @@ import {
 interface KeyframeCardsProps {
   firstFrame?: DeckItem;
   lastFrame?: DeckItem;
+  /** Whether the model supports a starting keyframe. */
+  showFirstFrame?: boolean;
   /** Whether the model supports an ending keyframe. */
   showLastFrame: boolean;
   onFirstAddActions: DeckAddAction[];
@@ -32,6 +34,7 @@ interface KeyframeCardsProps {
 export const KeyframeCards = ({
   firstFrame,
   lastFrame,
+  showFirstFrame = true,
   showLastFrame,
   onFirstAddActions,
   onLastAddActions = [],
@@ -51,33 +54,37 @@ export const KeyframeCards = ({
     >
       <DeckStyles />
 
-      <DeckSlotCard
-        item={firstFrame}
-        label="First frame"
-        tiltClass={showLastFrame ? "-rotate-6" : ""}
-        addActions={onFirstAddActions}
-        onRemove={onRemoveFirst}
-        onPreview={setPreviewItem}
-      />
+      {showFirstFrame && (
+        <DeckSlotCard
+          item={firstFrame}
+          label="First frame"
+          tiltClass={showLastFrame ? "-rotate-6" : ""}
+          addActions={onFirstAddActions}
+          onRemove={onRemoveFirst}
+          onPreview={setPreviewItem}
+        />
+      )}
 
       {showLastFrame && (
         <>
-          <div className="z-10 -mx-1.5 flex items-center justify-center">
-            {firstFrame && lastFrame && onSwap ? (
-              <button
-                type="button"
-                onClick={onSwap}
-                title="Swap frames"
-                className="flex h-5 w-5 items-center justify-center rounded-full border border-white/20 bg-black/60 text-[10px] text-white shadow backdrop-blur-md transition-all hover:scale-110 hover:bg-black/80"
-              >
-                <ArrowLeftRightIcon />
-              </button>
-            ) : (
-              <div className="pointer-events-none flex h-5 w-5 items-center justify-center rounded-full border border-white/10 bg-black/40 text-[10px] text-white/50 backdrop-blur-md">
-                <ArrowLeftRightIcon />
-              </div>
-            )}
-          </div>
+          {showFirstFrame && (
+            <div className="z-10 -mx-1.5 flex items-center justify-center">
+              {firstFrame && lastFrame && onSwap ? (
+                <button
+                  type="button"
+                  onClick={onSwap}
+                  title="Swap frames"
+                  className="flex h-5 w-5 items-center justify-center rounded-full border border-white/20 bg-black/60 text-[10px] text-white shadow backdrop-blur-md transition-all hover:scale-110 hover:bg-black/80"
+                >
+                  <ArrowLeftRightIcon />
+                </button>
+              ) : (
+                <div className="pointer-events-none flex h-5 w-5 items-center justify-center rounded-full border border-white/10 bg-black/40 text-[10px] text-white/50 backdrop-blur-md">
+                  <ArrowLeftRightIcon />
+                </div>
+              )}
+            </div>
+          )}
 
           <DeckSlotCard
             item={lastFrame}

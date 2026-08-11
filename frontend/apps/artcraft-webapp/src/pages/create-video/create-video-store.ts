@@ -66,6 +66,11 @@ type CreateVideoState = {
   setRefs: (patch: Partial<VideoRefsState>) => void;
   setPendingRecreate: (payload: RecreatePayload | null) => void;
   consumePendingRecreate: () => RecreatePayload | null;
+  commitPendingRecreate: (
+    payload: RecreatePayload,
+    ui: VideoUiState,
+    refs: VideoRefsState,
+  ) => boolean;
   setPendingRefImages: (refs: RefImage[] | null) => void;
   setPendingRefVideos: (refs: RefVideo[] | null) => void;
   startBatch: (
@@ -125,6 +130,17 @@ export const useCreateVideoStore = create<CreateVideoState>()(
         const payload = get().pendingRecreate;
         if (payload) set({ pendingRecreate: null });
         return payload;
+      },
+
+      commitPendingRecreate: (payload, ui, refs) => {
+        let committed = false;
+        set((state) => {
+          if (state.pendingRecreate !== payload) return state;
+          reconcileVideoRefUrls(state.refs, refs);
+          committed = true;
+          return { pendingRecreate: null, ui, refs };
+        });
+        return committed;
       },
 
       setPendingRefImages: (refs) =>

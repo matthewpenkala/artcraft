@@ -134,7 +134,16 @@ export const usePrompt3DStore = create<Prompt3DStore>()((set) => ({
 }));
 
 // ----- Image Prompt Box Store -----
-interface PromptImageStore {
+export interface PromptImageRecreateState {
+  prompt: string;
+  referenceImages: RefImage[];
+  generationCount: number;
+  commonAspectRatio: CommonAspectRatio | undefined;
+  commonResolution: CommonResolution | undefined;
+  commonQuality: CommonQuality | undefined;
+}
+
+export interface PromptImageStore {
   prompt: string;
   aspectRatio: AspectRatio;
   resolution: Resolution;
@@ -154,6 +163,7 @@ interface PromptImageStore {
   setCommonAspectRatio: (ratio: CommonAspectRatio | undefined) => void;
   setCommonResolution: (resolution: CommonResolution | undefined) => void;
   setCommonQuality: (quality: CommonQuality | undefined) => void;
+  commitRecreate: (state: PromptImageRecreateState) => void;
 }
 
 export const usePromptImageStore = create<PromptImageStore>()((set) => ({
@@ -183,12 +193,35 @@ export const usePromptImageStore = create<PromptImageStore>()((set) => ({
   setCommonAspectRatio: (commonAspectRatio) => set({ commonAspectRatio }),
   setCommonResolution: (commonResolution) => set({ commonResolution }),
   setCommonQuality: (commonQuality) => set({ commonQuality }),
+  commitRecreate: (next) =>
+    set((state) => {
+      reconcileReferenceUrls(
+        PROMPT_IMAGE_IMAGES_OWNER,
+        state.referenceImages,
+        next.referenceImages,
+      );
+      return next;
+    }),
 }));
 
 // ----- Video Prompt Box Store -----
 export type VideoInputMode = "keyframe" | "reference";
 
-interface PromptVideoStore {
+export interface PromptVideoRecreateState {
+  prompt: string;
+  resolution: Resolution | string;
+  aspectRatio: string | null;
+  referenceImages: RefImage[];
+  endFrameImage?: RefImage;
+  referenceVideos: RefVideo[];
+  referenceAudios: RefAudio[];
+  generateWithSound: boolean;
+  duration: number | null;
+  inputMode: VideoInputMode;
+  generationCount: number;
+}
+
+export interface PromptVideoStore {
   prompt: string;
   resolution: Resolution | string;
   aspectRatio: string | null;
@@ -214,6 +247,7 @@ interface PromptVideoStore {
   setDuration: (duration: number | null) => void;
   setInputMode: (mode: VideoInputMode) => void;
   setGenerationCount: (count: number) => void;
+  commitRecreate: (state: PromptVideoRecreateState) => void;
 }
 
 export const usePromptVideoStore = create<PromptVideoStore>()((set) => ({
@@ -289,6 +323,32 @@ export const usePromptVideoStore = create<PromptVideoStore>()((set) => ({
   setDuration: (duration) => set({ duration }),
   setInputMode: (inputMode) => set({ inputMode }),
   setGenerationCount: (generationCount) => set({ generationCount }),
+  commitRecreate: (next) =>
+    set((state) => {
+      reconcileOwnedMediaObjectUrlOwners([
+        {
+          owner: PROMPT_VIDEO_IMAGES_OWNER,
+          previousUrls: state.referenceImages.map((reference) => reference.url),
+          nextUrls: next.referenceImages.map((reference) => reference.url),
+        },
+        {
+          owner: PROMPT_VIDEO_END_IMAGE_OWNER,
+          previousUrls: state.endFrameImage ? [state.endFrameImage.url] : [],
+          nextUrls: next.endFrameImage ? [next.endFrameImage.url] : [],
+        },
+        {
+          owner: PROMPT_VIDEO_VIDEOS_OWNER,
+          previousUrls: state.referenceVideos.map((reference) => reference.url),
+          nextUrls: next.referenceVideos.map((reference) => reference.url),
+        },
+        {
+          owner: PROMPT_VIDEO_AUDIOS_OWNER,
+          previousUrls: state.referenceAudios.map((reference) => reference.url),
+          nextUrls: next.referenceAudios.map((reference) => reference.url),
+        },
+      ]);
+      return next;
+    }),
 }));
 
 // ----- Audio Prompt Box Store -----

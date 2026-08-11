@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { OmniGenApi } from "@storyteller/api";
-import type { OmniGenImageRequest, OmniGenVideoRequest } from "@storyteller/api";
+import type {
+  OmniGenImageRequest,
+  OmniGenVideoRequest,
+} from "@storyteller/api";
 import {
   buildVideoCostEstimateRequest,
   type MediaTokenDurationPair,
@@ -60,6 +63,7 @@ export function useImageCostEstimate(params: ImageCostParams): number | null {
     params.model,
     params.aspectRatio,
     params.resolution,
+    params.quality,
     params.numImages,
     params.hasReferenceImages,
     params.imageMediaTokenCount,
@@ -74,6 +78,7 @@ export interface VideoCostParams {
   model: string;
   aspectRatio?: string;
   resolution?: string | null;
+  bitrate?: string | null;
   duration?: number | null;
   numVideos?: number;
   hasStartFrame: boolean;
@@ -102,6 +107,7 @@ export function useVideoCostEstimate(params: VideoCostParams): number | null {
       model: params.model,
       aspectRatio: params.aspectRatio,
       resolution: params.resolution,
+      bitrate: params.bitrate,
       duration: params.duration,
       numVideos: params.numVideos,
       hasStartFrame: params.hasStartFrame,
@@ -140,6 +146,7 @@ export function useVideoCostEstimate(params: VideoCostParams): number | null {
     params.model,
     params.aspectRatio,
     params.resolution,
+    params.bitrate,
     params.duration,
     params.numVideos,
     params.hasStartFrame,

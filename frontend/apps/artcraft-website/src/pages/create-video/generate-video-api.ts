@@ -11,6 +11,7 @@ export interface GenerateVideoParams {
   aspectRatio?: string;
   duration?: number;
   resolution?: string;
+  bitrate?: string;
   generateAudio?: boolean;
   startFrameImageMediaToken?: string;
   endFrameImageMediaToken?: string;
@@ -36,6 +37,7 @@ export async function enqueueVideoGeneration(
     idempotency_token: crypto.randomUUID(),
     aspect_ratio: params.aspectRatio ?? null,
     resolution: params.resolution ?? null,
+    bitrate: params.bitrate ?? null,
     duration_seconds: params.duration ?? null,
     generate_audio: params.generateAudio ?? null,
     video_batch_count: params.numVideos ?? 1,
@@ -81,9 +83,11 @@ export async function enqueueVideoGeneration(
 
 // ── Poll for completion ──────────────────────────────────────────────────
 
-export async function pollVideoJobResult(
-  jobToken: string,
-): Promise<{ status: "pending" | "complete" | "failed"; video?: GeneratedVideo; error?: string }> {
+export async function pollVideoJobResult(jobToken: string): Promise<{
+  status: "pending" | "complete" | "failed";
+  video?: GeneratedVideo;
+  error?: string;
+}> {
   const jobsApi = new JobsApi();
   const response = await jobsApi.GetJobByToken({ token: jobToken });
 

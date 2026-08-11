@@ -1,10 +1,11 @@
 import { useCallback, useState, type MouseEvent } from "react";
 import { useNavigate, type NavigateFunction } from "react-router-dom";
+import { MediaFilesApi, PromptsApi, type Prompts } from "@storyteller/api";
 import {
-  MediaFilesApi,
-  PromptsApi,
-  type Prompts,
-} from "@storyteller/api";
+  hasNonImageRecreatedReferenceContexts,
+  hydrateRecreatedReferences,
+  probeMediaDurationFromUrl,
+} from "@storyteller/common";
 import { toast } from "../components/toast/toast";
 import type {
   RefAudio,
@@ -26,6 +27,7 @@ export interface RecreatePayload {
   referenceImages: RefImage[];
   aspectRatio?: string;
   resolution?: string;
+  bitrate?: string;
   modelId?: string;
   // video-only
   endFrameImage?: RefImage;
@@ -34,6 +36,29 @@ export interface RecreatePayload {
   generateWithSound?: boolean;
   durationSeconds?: number;
   inputMode?: VideoInputMode;
+  generationCount?: number;
+  excludedReferenceCount?: number;
+}
+
+export interface RecreateHydrationDependencies {
+  loadDurationMillis: (
+    mediaToken: string,
+  ) => Promise<number | null | undefined>;
+  probeVideoDuration: (url: string) => Promise<number | null>;
+  probeAudioDuration: (url: string) => Promise<number | null>;
+}
+
+let latestRecreateRequest = 0;
+
+function beginRecreateRequest(): number {
+  const requestId = ++latestRecreateRequest;
+  // A queued payload from an older request must not commit later merely
+  // because its destination model list finishes loading after this request.
+  const imageStore = useCreateImageStore.getState();
+  const videoStore = useCreateVideoStore.getState();
+  if (imageStore.pendingRecreate) imageStore.setPendingRecreate(null);
+  if (videoStore.pendingRecreate) videoStore.setPendingRecreate(null);
+  return requestId;
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -46,13 +71,13 @@ export function applyMakeVideoFromImage(
   mediaUrl: string,
   navigate: NavigateFunction,
 ): void {
+  beginRecreateRequest();
   useCreateVideoStore.getState().setPendingRecreate({
     prompt: "",
     referenceImages: [
       {
         id: crypto.randomUUID(),
         url: mediaUrl,
-        file: new File([], "make-video-ref"),
         mediaToken,
       },
     ],
@@ -68,15 +93,25 @@ export async function applyRecreateFromMediaToken(
   fallbackMediaClass: RecreateMediaClass,
   navigate: NavigateFunction,
 ): Promise<void> {
+  const requestId = beginRecreateRequest();
   try {
     const promptData = await fetchPromptForMedia(mediaToken);
     if (!promptData) {
-      toast.error("Recreate unavailable for this media");
+      if (requestId === latestRecreateRequest) {
+        toast.error("Recreate unavailable for this media");
+      }
       return;
     }
-    applyRecreateFromPromptData(promptData, fallbackMediaClass, navigate);
+    await applyRecreateFromPromptData(
+      promptData,
+      fallbackMediaClass,
+      navigate,
+      requestId,
+    );
   } catch {
-    toast.error("Failed to load recreate data");
+    if (requestId === latestRecreateRequest) {
+      toast.error("Failed to load recreate data");
+    }
   }
 }
 
@@ -88,17 +123,27 @@ export async function applyRecreateFromPromptToken(
   fallbackMediaClass: RecreateMediaClass,
   navigate: NavigateFunction,
 ): Promise<void> {
+  const requestId = beginRecreateRequest();
   try {
     const promptsApi = new PromptsApi();
     const resp = await promptsApi.GetPromptsByToken({ token: promptToken });
-    const promptData = resp.success ? resp.data ?? null : null;
+    const promptData = resp.success ? (resp.data ?? null) : null;
     if (!promptData) {
-      toast.error("Recreate data unavailable");
+      if (requestId === latestRecreateRequest) {
+        toast.error("Recreate data unavailable");
+      }
       return;
     }
-    applyRecreateFromPromptData(promptData, fallbackMediaClass, navigate);
+    await applyRecreateFromPromptData(
+      promptData,
+      fallbackMediaClass,
+      navigate,
+      requestId,
+    );
   } catch {
-    toast.error("Failed to load recreate data");
+    if (requestId === latestRecreateRequest) {
+      toast.error("Failed to load recreate data");
+    }
   }
 }
 
@@ -134,17 +179,26 @@ export function useRecreateFromPromptToken(
   return { isRecreating, handleRecreate };
 }
 
-function applyRecreateFromPromptData(
+async function applyRecreateFromPromptData(
   promptData: Prompts,
   fallbackMediaClass: RecreateMediaClass,
   navigate: NavigateFunction,
-): void {
+  requestId: number,
+): Promise<void> {
+  if (requestId !== latestRecreateRequest) return;
   const mediaClass = resolveMediaClass(promptData, fallbackMediaClass);
   if (!mediaClass) {
     toast.error("Recreate not supported for this media type");
     return;
   }
-  const payload = buildRecreatePayload(promptData, mediaClass);
+  const payload = await buildRecreatePayload(promptData, mediaClass);
+  if (requestId !== latestRecreateRequest) return;
+  if (payload.excludedReferenceCount) {
+    const count = payload.excludedReferenceCount;
+    toast.error(
+      `${count} unreadable reference ${count === 1 ? "file was" : "files were"} excluded`,
+    );
+  }
   if (mediaClass === "video") {
     useCreateVideoStore.getState().setPendingRecreate(payload);
     navigate("/create-video");
@@ -168,20 +222,50 @@ function resolveMediaClass(
   return fallback;
 }
 
-export function buildRecreatePayload(
+export async function buildRecreatePayload(
   promptData: Prompts,
   mediaClass: RecreateMediaClass,
-): RecreatePayload {
+  hydration: RecreateHydrationDependencies = defaultHydrationDependencies,
+): Promise<RecreatePayload> {
+  if (promptData.context_items_complete === false) {
+    throw new Error("Recreate reference context is incomplete");
+  }
   const contextImages = promptData.maybe_context_images || [];
-  const { referenceImages, endFrameImage, referenceVideos, referenceAudios } =
-    partitionContextImages(contextImages);
+  if (
+    mediaClass === "image" &&
+    hasNonImageRecreatedReferenceContexts(
+      contextImages.map(({ semantic }) => ({ semantic })),
+    )
+  ) {
+    throw new Error("Image Recreate contains non-image reference media");
+  }
+  const {
+    referenceImages,
+    endFrameImage,
+    referenceVideos,
+    referenceAudios,
+    excludedReferenceCount,
+  } = await partitionContextImages(
+    contextImages,
+    hydration,
+    promptData.maybe_positive_prompt || "",
+  );
+  if (
+    mediaClass === "image" &&
+    (endFrameImage || referenceVideos.length > 0 || referenceAudios.length > 0)
+  ) {
+    throw new Error("Image Recreate contains non-image reference media");
+  }
 
   const payload: RecreatePayload = {
     prompt: promptData.maybe_positive_prompt || "",
     referenceImages,
     aspectRatio: promptData.maybe_aspect_ratio || undefined,
     resolution: promptData.maybe_resolution || undefined,
+    bitrate: promptData.maybe_bitrate || undefined,
     modelId: promptData.maybe_model_type || undefined,
+    generationCount: promptData.maybe_batch_count ?? undefined,
+    excludedReferenceCount,
   };
 
   if (mediaClass === "video") {
@@ -190,7 +274,12 @@ export function buildRecreatePayload(
     payload.referenceAudios = referenceAudios;
     payload.generateWithSound = promptData.maybe_generate_audio ?? undefined;
     payload.durationSeconds = promptData.maybe_duration_seconds ?? undefined;
-    payload.inputMode = inferInputMode(promptData, referenceImages);
+    payload.inputMode = inferInputMode(
+      promptData,
+      referenceImages,
+      referenceVideos,
+      referenceAudios,
+    );
   }
 
   return payload;
@@ -211,7 +300,7 @@ async function fetchPromptForMedia(
   const promptResp = await promptsApi.GetPromptsByToken({
     token: mediaResp.data.maybe_prompt_token,
   });
-  return promptResp.success ? promptResp.data ?? null : null;
+  return promptResp.success ? (promptResp.data ?? null) : null;
 }
 
 interface PartitionedContext {
@@ -219,54 +308,77 @@ interface PartitionedContext {
   endFrameImage?: RefImage;
   referenceVideos: RefVideo[];
   referenceAudios: RefAudio[];
+  excludedReferenceCount: number;
 }
 
-function partitionContextImages(
-  contextImages: { semantic: string; media_token: string; media_links: { cdn_url: string } }[],
-): PartitionedContext {
-  const referenceImages: RefImage[] = [];
-  let endFrameImage: RefImage | undefined;
-  const referenceVideos: RefVideo[] = [];
-  const referenceAudios: RefAudio[] = [];
+async function partitionContextImages(
+  contextImages: {
+    semantic: string;
+    media_token: string;
+    media_links: { cdn_url: string };
+  }[],
+  hydration: RecreateHydrationDependencies,
+  positivePrompt: string,
+): Promise<PartitionedContext> {
+  const hydrated = await hydrateRecreatedReferences(
+    contextImages.map((context) => ({
+      semantic: context?.semantic,
+      mediaToken: context?.media_token,
+      url: context?.media_links?.cdn_url,
+    })),
+    hydration,
+    positivePrompt,
+  );
+  const asReference = (reference: { mediaToken: string; url: string }) => ({
+    id: crypto.randomUUID(),
+    url: reference.url,
+    mediaToken: reference.mediaToken,
+  });
 
-  for (const ci of contextImages) {
-    const base = {
-      id: crypto.randomUUID(),
-      url: ci.media_links.cdn_url,
-      mediaToken: ci.media_token,
-      file: new File([], "recreate-ref"),
-    };
-
-    switch (ci.semantic) {
-      case "vid_end_frame":
-        endFrameImage = base;
-        break;
-      case "vid_ref":
-        referenceVideos.push({ ...base, duration: 0 });
-        break;
-      case "audioref":
-        referenceAudios.push({ ...base, duration: 0 });
-        break;
-      default:
-        // imgref, imgref_character, imgref_style, imgref_bg, imgsrc,
-        // vid_start_frame, imgmask → image reference row
-        referenceImages.push(base);
-        break;
-    }
-  }
-
-  return { referenceImages, endFrameImage, referenceVideos, referenceAudios };
+  return {
+    referenceImages: hydrated.referenceImages.map(asReference),
+    endFrameImage: hydrated.endFrameImage
+      ? asReference(hydrated.endFrameImage)
+      : undefined,
+    referenceVideos: hydrated.referenceVideos.map((reference) => ({
+      ...asReference(reference),
+      duration: reference.duration,
+    })),
+    referenceAudios: hydrated.referenceAudios.map((reference) => ({
+      ...asReference(reference),
+      duration: reference.duration,
+    })),
+    excludedReferenceCount: hydrated.excludedReferenceCount,
+  };
 }
+
+const defaultHydrationDependencies: RecreateHydrationDependencies = {
+  loadDurationMillis: async (mediaToken) => {
+    const response = await new MediaFilesApi().GetMediaFileByToken({
+      mediaFileToken: mediaToken,
+    });
+    return response.success ? response.data?.maybe_duration_millis : null;
+  },
+  probeVideoDuration: (url) => probeMediaDurationFromUrl("video", url),
+  probeAudioDuration: (url) => probeMediaDurationFromUrl("audio", url),
+};
 
 function inferInputMode(
   promptData: Prompts,
   referenceImages: RefImage[],
+  referenceVideos: RefVideo[],
+  referenceAudios: RefAudio[],
 ): VideoInputMode {
-  const mode = promptData.maybe_generation_mode;
-  if (mode === "keyframe" || mode === "reference") return mode;
   const hasKeyframeSemantics = (promptData.maybe_context_images || []).some(
-    (ci) => ci.semantic === "vid_start_frame" || ci.semantic === "vid_end_frame",
+    (ci) =>
+      ci.semantic === "vid_start_frame" || ci.semantic === "vid_end_frame",
   );
   if (hasKeyframeSemantics) return "keyframe";
-  return referenceImages.length > 0 ? "reference" : "keyframe";
+  const mode = promptData.maybe_generation_mode;
+  if (mode === "keyframe" || mode === "reference") return mode;
+  return referenceImages.length > 0 ||
+    referenceVideos.length > 0 ||
+    referenceAudios.length > 0
+    ? "reference"
+    : "keyframe";
 }

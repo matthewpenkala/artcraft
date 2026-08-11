@@ -64,7 +64,6 @@ export function galleryItemToRefImage(item: GalleryItem): RefImage {
     id: crypto.randomUUID(),
     url: item.thumbnail || item.fullImage || "",
     fullUrl: item.fullImage || undefined,
-    file: new File([], "library-image"),
     mediaToken: item.id,
   };
 }
@@ -73,7 +72,6 @@ function galleryItemToRefVideo(item: GalleryItem): RefVideo {
   return {
     id: crypto.randomUUID(),
     url: item.fullImage || "",
-    file: new File([], "library-video"),
     mediaToken: item.id,
     // 0 = unknown; the video page probes the file before adding it.
     duration: item.durationMillis ? item.durationMillis / 1000 : 0,

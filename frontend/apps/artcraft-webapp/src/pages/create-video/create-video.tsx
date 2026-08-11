@@ -61,10 +61,7 @@ import {
   mergeRefImages,
   toastMergeRefImagesOutcome,
 } from "../../lib/send-to-prompt";
-import {
-  resolveModelOption,
-  resolveModelCount,
-} from "../../lib/resolve-model-setting";
+import { resolveModelOption } from "../../lib/resolve-model-setting";
 import {
   useOmniGenVideoModels,
   OMNI_GENERATE_OUTAGE_MESSAGE,
@@ -74,9 +71,14 @@ import {
   getCreatorIconPathForModelId,
   getCreatorIconSourceForModelId,
   getModelDescription,
+  getEffectiveVideoReferenceCapabilities,
+  getVideoDurationConstraint,
+  hasVideoDurationConfiguration,
+  projectVideoReferenceMedia,
   getModelFamilyName,
   getModelInfo,
   modelCreatorFromBackend,
+  resolveVideoDuration,
 } from "@storyteller/model-list";
 import { useSignupCta } from "../../components/signup-cta-modal";
 import { useInsufficientCredits } from "../../components/insufficient-credits-modal";
@@ -84,7 +86,11 @@ import { toast } from "../../components/toast/toast";
 import {
   appendProbedMediaReferenceBatch,
   formatMediaDurationSeconds,
+  prepareMediaReferencesForSubmission,
   remainingMediaDurationSeconds,
+  resolveTargetModelCount,
+  resolveTargetModelOption,
+  validateRecreatedVideoReferences,
 } from "@storyteller/common";
 
 // ── Constants ────────────────────────────────────────────────────────────
@@ -101,6 +107,26 @@ const CHARACTERS_DISABLED_MODEL_IDS = new Set([
 const VIDEO_FILTER = [FilterMediaClasses.VIDEO];
 
 const AUTO_RATIOS = new Set(["auto", "auto_2k", "auto_3k", "auto_4k"]);
+
+const referenceCapabilitiesForModel = (
+  model: OmniGenVideoModelInfo | undefined,
+) => ({
+  startFrame: model?.starting_keyframe_supported,
+  endFrame: model?.ending_keyframe_supported,
+  requiresImage:
+    model?.starting_keyframe_required === true ||
+    model?.text_to_video_supported === false,
+  supportsImageReferences: model?.image_references_supported,
+  supportsVideoReferences: model?.video_references_supported,
+  supportsAudioReferences: model?.audio_references_supported,
+  maxReferenceImages: model?.image_references_max ?? undefined,
+  maxReferenceVideos: model?.video_references_max ?? undefined,
+  maxVideoRefDuration:
+    model?.video_references_max_total_duration_seconds ?? undefined,
+  maxReferenceAudios: model?.audio_references_max ?? undefined,
+  maxAudioRefDuration:
+    model?.audio_references_max_total_duration_seconds ?? undefined,
+});
 
 // ── Aspect ratio labels (shared with image page) ─────────────────────────
 
@@ -203,45 +229,6 @@ function buildSizePopoverItems(
   }));
 }
 
-// Effective max duration for the active input mode. Some models (e.g. Grok)
-// cap duration lower when image references are used — that's reference mode here.
-function maxDurationForMode(
-  model: OmniGenVideoModelInfo,
-  isReferenceMode: boolean,
-): number | null {
-  const imageRefMax = model.duration_seconds_max_with_image_references;
-  return isReferenceMode && imageRefMax != null
-    ? imageRefMax
-    : model.duration_seconds_max;
-}
-
-function resolveDurationForModel(
-  model: OmniGenVideoModelInfo,
-  current: number | null,
-  isReferenceMode: boolean,
-): number | null {
-  if (current == null) return model.duration_seconds_default ?? null;
-  const max = maxDurationForMode(model, isReferenceMode);
-  if (model.duration_seconds_min != null && max != null) {
-    // Clamp the user's chosen seconds into this model's range rather than
-    // resetting to the default — switching from a 15s model to a 10s-max model
-    // should land on 10s (closest available), not jump down to the minimum.
-    return Math.min(Math.max(current, model.duration_seconds_min), max);
-  }
-  if (model.duration_seconds_options?.length) {
-    const options = model.duration_seconds_options;
-    if (options.includes(current)) return current;
-    // Snap to the nearest supported option (ties → longer) instead of the
-    // default, so e.g. 15s on a 5s/10s model resolves to 10s, not 5s.
-    return options.reduce((best, o) => {
-      const dBest = Math.abs(best - current);
-      const dO = Math.abs(o - current);
-      return dO < dBest || (dO === dBest && o > best) ? o : best;
-    }, options[0]!);
-  }
-  return model.duration_seconds_default ?? null;
-}
-
 // ── Component ────────────────────────────────────────────────────────────
 
 export default function CreateVideo() {
@@ -331,9 +318,10 @@ export default function CreateVideo() {
     [setUi],
   );
   const generateWithSound = ui.generateWithSound;
-  const numVideos = resolveModelCount(
+  const numVideos = resolveTargetModelCount(
     ui.numVideos,
     selectedModel?.batch_size_options,
+    selectedModel?.batch_size_min,
     selectedModel?.batch_size_max,
     selectedModel?.batch_size_default,
   );
@@ -347,8 +335,32 @@ export default function CreateVideo() {
   // Reference media (persisted in store so refs survive navigation)
   const refs = useCreateVideoStore((s) => s.refs);
   const setRefs = useCreateVideoStore((s) => s.setRefs);
+  const {
+    referenceImages: storedReferenceImages,
+    endFrameImage: storedEndFrameImage,
+    referenceVideos: storedReferenceVideos,
+    referenceAudios: storedReferenceAudios,
+  } = refs;
+  const referenceMediaProjection = useMemo(
+    () =>
+      projectVideoReferenceMedia(referenceCapabilitiesForModel(selectedModel), {
+        inputMode: ui.inputMode,
+        referenceImages: storedReferenceImages,
+        endFrameImage: storedEndFrameImage,
+        referenceVideos: storedReferenceVideos,
+        referenceAudios: storedReferenceAudios,
+      }),
+    [
+      selectedModel,
+      ui.inputMode,
+      storedReferenceImages,
+      storedEndFrameImage,
+      storedReferenceVideos,
+      storedReferenceAudios,
+    ],
+  );
   const { referenceImages, endFrameImage, referenceVideos, referenceAudios } =
-    refs;
+    referenceMediaProjection;
   const referencePickerEpochRef = useRef(0);
   const setReferenceImages = useCallback(
     (v: RefImage[]) => setRefs({ referenceImages: v }),
@@ -470,25 +482,42 @@ export default function CreateVideo() {
     !!selectedModel?.starting_keyframe_supported ||
     !!selectedModel?.starting_keyframe_required ||
     !!selectedModel?.image_references_supported;
-  const supportsVideoRefs = !!selectedModel?.video_references_supported;
-  const supportsAudioRefs = !!selectedModel?.audio_references_supported;
-  const maxVideoRefs = selectedModel?.video_references_max ?? 3;
-  const maxVideoRefDuration =
-    selectedModel?.video_references_max_total_duration_seconds ?? 30;
-  const maxAudioRefs = selectedModel?.audio_references_max ?? 2;
-  const maxAudioRefDurationTotal =
-    selectedModel?.audio_references_max_total_duration_seconds ?? 30;
-  const supportsRefMode =
-    !!selectedModel?.image_references_supported ||
-    supportsVideoRefs ||
-    supportsAudioRefs;
-  const inputMode = ui.inputMode;
+  const referenceCapabilities = referenceMediaProjection.capabilities;
+  const supportsVideoRefs = referenceCapabilities.canUseVideoReferences;
+  const supportsAudioRefs = referenceCapabilities.canUseAudioReferences;
+  const maxReferenceImages =
+    referenceCapabilities.maxReferenceImages ?? Number.MAX_SAFE_INTEGER;
+  const maxVideoRefs =
+    referenceCapabilities.maxReferenceVideos ?? Number.MAX_SAFE_INTEGER;
+  const maxVideoRefDuration = referenceCapabilities.maxVideoRefDuration;
+  const maxAudioRefs =
+    referenceCapabilities.maxReferenceAudios ?? Number.MAX_SAFE_INTEGER;
+  const maxAudioRefDurationTotal = referenceCapabilities.maxAudioRefDuration;
+  const supportsRefMode = referenceCapabilities.supportsReferenceMode;
+  const inputMode = referenceMediaProjection.inputMode;
   const isReferenceMode = supportsRefMode && inputMode === "reference";
   const hasEndFrame = !!(
     selectedModel?.ending_keyframe_supported && !isReferenceMode
   );
   const needsImage =
     !!selectedModel?.starting_keyframe_required && referenceImages.length === 0;
+
+  const durationCapabilities = selectedModel
+    ? {
+        durationOptions: selectedModel.duration_seconds_options ?? undefined,
+        minDuration: selectedModel.duration_seconds_min ?? undefined,
+        maxDuration: selectedModel.duration_seconds_max ?? undefined,
+        maxDurationWithImageReferences:
+          selectedModel.duration_seconds_max_with_image_references ?? undefined,
+        defaultDuration: selectedModel.duration_seconds_default ?? undefined,
+      }
+    : null;
+  const durationMediaInputs = {
+    imageCount: referenceImages.length,
+    hasEndFrameImage: !isReferenceMode && !!endFrameImage,
+    videoCount: referenceVideos.length,
+    audioCount: referenceAudios.length,
+  };
 
   const referencePickerMountedRef = useRef(true);
   const referencePickerPolicy = {
@@ -497,7 +526,7 @@ export default function CreateVideo() {
     supportsImages: supportsImagePrompts,
     supportsVideos: supportsVideoRefs,
     supportsAudios: supportsAudioRefs,
-    maxImages: isReferenceMode ? (selectedModel?.image_references_max ?? 3) : 1,
+    maxImages: isReferenceMode ? maxReferenceImages : 1,
     maxVideos: maxVideoRefs,
     maxVideoSeconds: maxVideoRefDuration,
     maxAudios: maxAudioRefs,
@@ -529,9 +558,13 @@ export default function CreateVideo() {
   // them, else clamp/snap to this model's range for display + generation. The
   // stored preference (ui.duration) stays untouched, so switching back restores
   // it — same sticky behavior as the other settings.
-  const effectiveDuration = selectedModel
-    ? (resolveDurationForModel(selectedModel, duration, isReferenceMode) ??
-      selectedModel.duration_seconds_default ??
+  const effectiveDuration = durationCapabilities
+    ? (resolveVideoDuration(
+        durationCapabilities,
+        duration,
+        durationMediaInputs,
+      ) ??
+      selectedModel?.duration_seconds_default ??
       5)
     : (duration ?? 5);
 
@@ -714,26 +747,22 @@ export default function CreateVideo() {
     [selectedModel?.aspect_ratio_options, selectedSize],
   );
   const durationRange = useMemo((): { min: number; max: number } | null => {
-    if (!selectedModel) return null;
-    const max = maxDurationForMode(selectedModel, isReferenceMode);
-    if (
-      selectedModel.duration_seconds_min != null &&
-      max != null &&
-      max > selectedModel.duration_seconds_min
-    ) {
-      return { min: selectedModel.duration_seconds_min, max };
+    if (!durationCapabilities) return null;
+    const constraint = getVideoDurationConstraint(
+      durationCapabilities,
+      durationMediaInputs,
+    );
+    if (constraint?.kind === "range" && constraint.max > constraint.min) {
+      return { min: constraint.min, max: constraint.max };
     }
-    if (
-      selectedModel.duration_seconds_options &&
-      selectedModel.duration_seconds_options.length > 1
-    ) {
-      const opts = [...selectedModel.duration_seconds_options].sort(
-        (a, b) => a - b,
-      );
-      return { min: opts[0]!, max: opts[opts.length - 1]! };
+    if (constraint?.kind === "options" && constraint.options.length > 1) {
+      return {
+        min: constraint.options[0]!,
+        max: constraint.options[constraint.options.length - 1]!,
+      };
     }
     return null;
-  }, [selectedModel, isReferenceMode]);
+  }, [durationCapabilities, durationMediaInputs]);
   const [localDuration, setLocalDuration] = useState(effectiveDuration);
   const durationTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => {
@@ -746,14 +775,15 @@ export default function CreateVideo() {
       // Snap to a model-valid duration so the thumb and the chip never disagree
       // (no-op for continuous-range models; snaps to the nearest option for
       // models with sparse second options like 5s / 10s).
-      const snapped = selectedModel
-        ? (resolveDurationForModel(selectedModel, v, isReferenceMode) ?? v)
+      const snapped = durationCapabilities
+        ? (resolveVideoDuration(durationCapabilities, v, durationMediaInputs) ??
+          v)
         : v;
       setLocalDuration(snapped);
       clearTimeout(durationTimerRef.current);
       durationTimerRef.current = setTimeout(() => setDuration(snapped), 300);
     },
-    [setDuration, selectedModel, isReferenceMode],
+    [setDuration, durationCapabilities, durationMediaInputs],
   );
   const resolutionItems = useMemo(
     (): PopoverItem[] | null =>
@@ -811,56 +841,159 @@ export default function CreateVideo() {
   // builds its label regex from `referenceImages`/`referenceVideos`/etc.) knows
   // about every `@ImageN` before the contentEditable does its DOM sync. Without
   // this ordering, only the last reference's mention would end up colored.
-  // Warn when a recreated generation's model is missing from the current
-  // model list: selectedModel silently falls back to the default model, and
-  // the restored prompt/settings may not be valid for it. Verified in its own
-  // effect because the model list may still be loading when the recreate
-  // payload is consumed.
-  const [recreateModelIdToVerify, setRecreateModelIdToVerify] = useState<
-    string | null
-  >(null);
+  const pendingRecreate = useCreateVideoStore((s) => s.pendingRecreate);
   useEffect(() => {
-    if (!recreateModelIdToVerify || apiModels.length === 0) return;
-    if (!apiModels.some((m) => m.model === recreateModelIdToVerify)) {
+    if (!pendingRecreate || apiModels.length === 0) return;
+    const payload = pendingRecreate;
+    if (useCreateVideoStore.getState().pendingRecreate !== payload) return;
+    const requestedModel = payload.modelId
+      ? apiModels.find((model) => model.model === payload.modelId)
+      : undefined;
+    const rawTargetModel =
+      requestedModel ??
+      apiModels.find((model) => model.model === DEFAULT_MODEL_ID) ??
+      apiModels[0];
+    if (!rawTargetModel) return;
+    const targetModel =
+      rawTargetModel.text_to_video_supported === false
+        ? { ...rawTargetModel, starting_keyframe_required: true }
+        : rawTargetModel;
+
+    const inputMode = payload.inputMode ?? "keyframe";
+    const images = prepareMediaReferencesForSubmission(payload.referenceImages);
+    const videos = prepareMediaReferencesForSubmission(
+      payload.referenceVideos ?? [],
+    );
+    const audios = prepareMediaReferencesForSubmission(
+      payload.referenceAudios ?? [],
+    );
+    const endFrames = prepareMediaReferencesForSubmission(
+      payload.endFrameImage ? [payload.endFrameImage] : [],
+    );
+    const targetCapabilities = getEffectiveVideoReferenceCapabilities({
+      startFrame: targetModel.starting_keyframe_supported,
+      endFrame: targetModel.ending_keyframe_supported,
+      requiresImage: targetModel.starting_keyframe_required,
+      supportsImageReferences: targetModel.image_references_supported,
+      supportsVideoReferences: targetModel.video_references_supported,
+      supportsAudioReferences: targetModel.audio_references_supported,
+      maxReferenceImages: targetModel.image_references_max ?? undefined,
+      maxReferenceVideos: targetModel.video_references_max ?? undefined,
+      maxVideoRefDuration:
+        targetModel.video_references_max_total_duration_seconds ?? undefined,
+      maxReferenceAudios: targetModel.audio_references_max ?? undefined,
+      maxAudioRefDuration:
+        targetModel.audio_references_max_total_duration_seconds ?? undefined,
+    });
+    const validation =
+      images && videos && audios && endFrames
+        ? validateRecreatedVideoReferences(
+            {
+              imageCount: images.length,
+              hasEndFrame: endFrames.length > 0,
+              videoDurations: videos.map((video) => video.duration),
+              audioDurations: audios.map((audio) => audio.duration),
+            },
+            inputMode,
+            {
+              ...targetCapabilities,
+              requiresStartFrame:
+                targetModel.starting_keyframe_required === true,
+            },
+          )
+        : "invalid-video-duration";
+    if (validation !== "valid") {
+      const store = useCreateVideoStore.getState();
+      if (store.pendingRecreate !== payload) return;
+      store.setPendingRecreate(null);
+      toast.error(
+        validation === "invalid-video-duration" ||
+          validation === "invalid-audio-duration"
+          ? "Recreate references contain an unreadable duration or media token"
+          : "Recreate references are incompatible with this model",
+      );
+      return;
+    }
+
+    const targetReferenceMode = inputMode === "reference";
+    const targetDurationCapabilities = {
+      durationOptions: targetModel.duration_seconds_options ?? undefined,
+      minDuration: targetModel.duration_seconds_min ?? undefined,
+      maxDuration: targetModel.duration_seconds_max ?? undefined,
+      maxDurationWithImageReferences:
+        targetModel.duration_seconds_max_with_image_references ?? undefined,
+      defaultDuration: targetModel.duration_seconds_default ?? undefined,
+    };
+    const targetDuration = resolveVideoDuration(
+      targetDurationCapabilities,
+      payload.durationSeconds,
+      {
+        imageCount: images!.length,
+        hasEndFrameImage: !targetReferenceMode && endFrames!.length > 0,
+        videoCount: videos!.length,
+        audioCount: audios!.length,
+      },
+    );
+    if (
+      targetDuration === null &&
+      hasVideoDurationConfiguration(targetDurationCapabilities)
+    ) {
+      const store = useCreateVideoStore.getState();
+      if (store.pendingRecreate !== payload) return;
+      store.setPendingRecreate(null);
+      toast.error("Recreate has no valid duration for this model");
+      return;
+    }
+    const committed = useCreateVideoStore.getState().commitPendingRecreate(
+      payload,
+      {
+        selectedModelId: targetModel.model,
+        prompt: payload.prompt,
+        selectedSize:
+          resolveTargetModelOption(
+            payload.aspectRatio,
+            targetModel.aspect_ratio_options,
+            targetModel.aspect_ratio_default,
+          ) ?? "wide_sixteen_by_nine",
+        duration: targetDuration,
+        resolution:
+          resolveTargetModelOption(
+            payload.resolution,
+            targetModel.resolution_options,
+            targetModel.resolution_default,
+          ) ?? null,
+        bitrate:
+          resolveTargetModelOption(
+            payload.bitrate,
+            targetModel.bitrate_options,
+            targetModel.bitrate_default,
+          ) ?? null,
+        generateWithSound:
+          targetModel.show_generate_with_sound_toggle === true
+            ? (payload.generateWithSound ?? false)
+            : false,
+        inputMode,
+        numVideos: resolveTargetModelCount(
+          payload.generationCount,
+          targetModel.batch_size_options,
+          targetModel.batch_size_min,
+          targetModel.batch_size_max,
+          targetModel.batch_size_default,
+        ),
+      },
+      {
+        referenceImages: images!,
+        endFrameImage: endFrames![0],
+        referenceVideos: videos!,
+        referenceAudios: audios!,
+      },
+    );
+    if (committed && payload.modelId && !requestedModel) {
       toast.error(
         "The model used for this generation isn't available anymore. Using the default model instead.",
       );
     }
-    setRecreateModelIdToVerify(null);
-  }, [recreateModelIdToVerify, apiModels]);
-
-  const pendingRecreate = useCreateVideoStore((s) => s.pendingRecreate);
-  useEffect(() => {
-    if (!pendingRecreate) return;
-    const payload = useCreateVideoStore.getState().consumePendingRecreate();
-    if (!payload) return;
-
-    flushSync(() => {
-      setRefs({
-        referenceImages: payload.referenceImages,
-        endFrameImage: payload.endFrameImage,
-        referenceVideos: payload.referenceVideos ?? [],
-        referenceAudios: payload.referenceAudios ?? [],
-      });
-      setUi({
-        ...(payload.modelId ? { selectedModelId: payload.modelId } : {}),
-        ...(payload.inputMode ? { inputMode: payload.inputMode } : {}),
-      });
-    });
-    if (payload.modelId) setRecreateModelIdToVerify(payload.modelId);
-
-    setUi({
-      prompt: payload.prompt,
-      ...(payload.aspectRatio ? { selectedSize: payload.aspectRatio } : {}),
-      ...(payload.resolution ? { resolution: payload.resolution } : {}),
-      ...(payload.durationSeconds != null
-        ? { duration: payload.durationSeconds }
-        : {}),
-      ...(payload.generateWithSound != null
-        ? { generateWithSound: payload.generateWithSound }
-        : {}),
-    });
-  }, [pendingRecreate, setUi]);
+  }, [pendingRecreate, apiModels]);
 
   // Consume reference images sent from the library ("Send to prompt").
   // Waits for the model list so the merge applies the real per-model cap —
@@ -875,7 +1008,7 @@ export default function CreateVideo() {
       !!selectedModel?.starting_keyframe_supported ||
       !!selectedModel?.starting_keyframe_required;
     const maxImages = supportsRefs
-      ? (selectedModel?.image_references_max ?? 3)
+      ? maxReferenceImages
       : supportsKeyframe
         ? 1
         : 0;
@@ -1055,28 +1188,20 @@ export default function CreateVideo() {
     (item: PopoverItem) => {
       const mode = item.label === "Omni Reference" ? "reference" : "keyframe";
       if (mode === inputMode) return;
+      setUi({ inputMode: mode });
       if (mode === "reference") {
-        // Some models (e.g. Grok) cap duration lower in image-reference mode.
-        const cap = selectedModel?.duration_seconds_max_with_image_references;
-        const clamped = cap != null && (duration ?? 0) > cap ? cap : undefined;
-        setUi({
-          inputMode: mode,
-          ...(clamped != null ? { duration: clamped } : {}),
-        });
         setEndFrameImage(undefined);
       } else {
-        setUi({ inputMode: mode });
         setReferenceVideos([]);
         setReferenceAudios([]);
       }
     },
-    [inputMode, duration, selectedModel, setUi],
+    [inputMode, setUi],
   );
 
   const imagePickerMax = Math.max(
     1,
-    (isReferenceMode ? (selectedModel?.image_references_max ?? 3) : 1) -
-      referenceImages.length,
+    (isReferenceMode ? maxReferenceImages : 1) - referenceImages.length,
   );
 
   const handlePickerSelect = useCallback(
@@ -1362,37 +1487,124 @@ export default function CreateVideo() {
       );
       return;
     }
+    const sentMedia = projectVideoReferenceMedia(
+      {
+        startFrame: selectedModel.starting_keyframe_supported,
+        endFrame: selectedModel.ending_keyframe_supported,
+        requiresImage: selectedModel.starting_keyframe_required,
+        supportsImageReferences: selectedModel.image_references_supported,
+        supportsVideoReferences: selectedModel.video_references_supported,
+        supportsAudioReferences: selectedModel.audio_references_supported,
+        maxReferenceImages: selectedModel.image_references_max ?? undefined,
+        maxReferenceVideos: selectedModel.video_references_max ?? undefined,
+        maxVideoRefDuration:
+          selectedModel.video_references_max_total_duration_seconds ??
+          undefined,
+        maxReferenceAudios: selectedModel.audio_references_max ?? undefined,
+        maxAudioRefDuration:
+          selectedModel.audio_references_max_total_duration_seconds ??
+          undefined,
+      },
+      {
+        inputMode,
+        referenceImages,
+        endFrameImage,
+        referenceVideos,
+        referenceAudios,
+      },
+    );
+    const requestIsReferenceMode = sentMedia.inputMode === "reference";
+    const submittedImages = prepareMediaReferencesForSubmission(
+      sentMedia.referenceImages,
+    );
+    const submittedVideos = prepareMediaReferencesForSubmission(
+      sentMedia.referenceVideos,
+    );
+    const submittedAudios = prepareMediaReferencesForSubmission(
+      sentMedia.referenceAudios,
+    );
+    const submittedEndFrames = prepareMediaReferencesForSubmission(
+      sentMedia.endFrameImage ? [sentMedia.endFrameImage] : [],
+    );
+    if (
+      !submittedImages ||
+      !submittedVideos ||
+      !submittedAudios ||
+      !submittedEndFrames
+    ) {
+      toast.error("Every reference must finish uploading before generation");
+      return;
+    }
+    const referenceStatus = validateRecreatedVideoReferences(
+      {
+        imageCount: submittedImages.length,
+        hasEndFrame: submittedEndFrames.length > 0,
+        videoDurations: submittedVideos.map((video) => video.duration),
+        audioDurations: submittedAudios.map((audio) => audio.duration),
+      },
+      requestIsReferenceMode ? "reference" : "keyframe",
+      {
+        ...referenceCapabilities,
+        requiresStartFrame: selectedModel.starting_keyframe_required === true,
+      },
+    );
+    if (referenceStatus !== "valid") {
+      toast.error(
+        referenceStatus === "invalid-video-duration" ||
+          referenceStatus === "invalid-audio-duration"
+          ? "Could not verify every reference duration. Remove the unreadable reference and try again."
+          : "Reference media exceeds or conflicts with this model's capabilities.",
+      );
+      return;
+    }
+    const requestDuration = durationCapabilities
+      ? resolveVideoDuration(durationCapabilities, duration, {
+          imageCount: submittedImages.length,
+          hasEndFrameImage:
+            !requestIsReferenceMode && submittedEndFrames.length > 0,
+          videoCount: submittedVideos.length,
+          audioCount: submittedAudios.length,
+        })
+      : effectiveDuration;
+    if (
+      requestDuration === null &&
+      durationCapabilities &&
+      hasVideoDurationConfiguration(durationCapabilities)
+    ) {
+      toast.error(
+        "This model has no valid duration for the attached reference media",
+      );
+      return;
+    }
     console.log("[generate-video] starting", {
       model: selectedModel.model,
       numVideos,
       inputMode,
-      isReferenceMode,
+      isReferenceMode: requestIsReferenceMode,
     });
     const startFrameToken =
-      !isReferenceMode && supportsImagePrompts && referenceImages.length > 0
-        ? referenceImages[0].mediaToken
+      !requestIsReferenceMode &&
+      supportsImagePrompts &&
+      submittedImages.length > 0
+        ? submittedImages[0].mediaToken
         : undefined;
     const endFrameToken =
-      !isReferenceMode && hasEndFrame && endFrameImage?.mediaToken
-        ? endFrameImage.mediaToken
+      !requestIsReferenceMode &&
+      hasEndFrame &&
+      submittedEndFrames[0]?.mediaToken
+        ? submittedEndFrames[0].mediaToken
         : undefined;
     const referenceImageTokens =
-      isReferenceMode && referenceImages.length > 0
-        ? referenceImages
-            .map((img) => img.mediaToken)
-            .filter((t): t is string => typeof t === "string" && t.length > 0)
+      requestIsReferenceMode && submittedImages.length > 0
+        ? submittedImages.map((image) => image.mediaToken!)
         : undefined;
     const referenceVideoTokens =
-      isReferenceMode && referenceVideos.length > 0
-        ? referenceVideos
-            .map((v) => v.mediaToken)
-            .filter((t): t is string => typeof t === "string" && t.length > 0)
+      requestIsReferenceMode && submittedVideos.length > 0
+        ? submittedVideos.map((video) => video.mediaToken!)
         : undefined;
     const referenceAudioTokens =
-      isReferenceMode && referenceAudios.length > 0
-        ? referenceAudios
-            .map((a) => a.mediaToken)
-            .filter((t): t is string => typeof t === "string" && t.length > 0)
+      requestIsReferenceMode && submittedAudios.length > 0
+        ? submittedAudios.map((audio) => audio.mediaToken!)
         : undefined;
 
     // Extract character tokens from @-mentions in the prompt, resolving to
@@ -1430,7 +1642,7 @@ export default function CreateVideo() {
       model: selectedModel.model,
       numVideos,
       aspectRatio: selectedSize,
-      duration: effectiveDuration,
+      duration: requestDuration ?? effectiveDuration,
       resolution: hasResolutionOptions
         ? (resolution ?? selectedModel.resolution_default ?? undefined)
         : undefined,
@@ -1551,6 +1763,9 @@ export default function CreateVideo() {
     endFrameImage,
     referenceVideos,
     referenceAudios,
+    referenceCapabilities,
+    durationCapabilities,
+    duration,
     activeCharacters,
     startBatch,
     setBatchJobToken,
@@ -1572,10 +1787,8 @@ export default function CreateVideo() {
         onPickVideoFromLibrary={() => setIsVideoRefPickerOpen(true)}
         referenceAudios={referenceAudios}
         onReferenceAudiosChange={setReferenceAudios}
-        maxAudioCount={selectedModel?.audio_references_max ?? 2}
-        maxAudioRefDuration={
-          selectedModel?.audio_references_max_total_duration_seconds ?? 30
-        }
+        maxAudioCount={maxAudioRefs}
+        maxAudioRefDuration={maxAudioRefDurationTotal}
         onPickAudioFromLibrary={() => setIsAudioRefPickerOpen(true)}
       />
     ) : undefined;
@@ -1651,11 +1864,9 @@ export default function CreateVideo() {
         />
       }
       frames={
-        supportsImagePrompts ? (
+        supportsImagePrompts || hasEndFrame ? (
           <ImagePromptRow
-            maxImagePromptCount={
-              isReferenceMode ? (selectedModel?.image_references_max ?? 3) : 1
-            }
+            maxImagePromptCount={isReferenceMode ? maxReferenceImages : 1}
             referenceImages={referenceImages}
             setReferenceImages={setReferenceImages}
             onPickFromLibrary={
@@ -1665,6 +1876,11 @@ export default function CreateVideo() {
             }
             isVideo
             isReferenceMode={isReferenceMode}
+            showStartFrameSection={
+              isReferenceMode
+                ? supportsImagePrompts
+                : referenceCapabilities.supportsStartFrame
+            }
             endFrameImage={endFrameImage}
             setEndFrameImage={setEndFrameImage}
             showEndFrameSection={hasEndFrame}
@@ -1873,9 +2089,8 @@ export default function CreateVideo() {
             maxPromptLength={maxPromptLength}
             placeholder={promptPlaceholder}
             supportsImagePrompts={supportsImagePrompts}
-            maxImagePromptCount={
-              isReferenceMode ? (selectedModel?.image_references_max ?? 3) : 1
-            }
+            supportsStartFrame={referenceCapabilities.supportsStartFrame}
+            maxImagePromptCount={isReferenceMode ? maxReferenceImages : 1}
             referenceImages={referenceImages}
             onReferenceImagesChange={setReferenceImages}
             isVideo
@@ -1943,10 +2158,8 @@ export default function CreateVideo() {
             audioRefsSupported={supportsAudioRefs}
             referenceAudios={referenceAudios}
             onReferenceAudiosChange={setReferenceAudios}
-            maxAudioCount={selectedModel?.audio_references_max ?? 2}
-            maxAudioRefDuration={
-              selectedModel?.audio_references_max_total_duration_seconds ?? 30
-            }
+            maxAudioCount={maxAudioRefs}
+            maxAudioRefDuration={maxAudioRefDurationTotal}
             onPickAudioFromLibrary={
               supportsAudioRefs
                 ? () => setIsAudioRefPickerOpen(true)

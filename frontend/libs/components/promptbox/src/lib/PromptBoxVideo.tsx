@@ -3,6 +3,9 @@ import { useSignals } from "@preact/signals-react/runtime";
 import {
   JobContextType,
   formatMediaDurationSeconds,
+  prepareMediaReferencesForSubmission,
+  resolveTargetModelCount,
+  validateRecreatedVideoReferences,
 } from "@storyteller/common";
 import { PopoverMenu, PopoverItem } from "@storyteller/ui-popover";
 import { SliderV2 } from "@storyteller/ui-sliderv2";
@@ -30,6 +33,7 @@ import {
   projectPromptVideoReferences,
   synchronizePromptVideoReferences,
 } from "./videoReferenceControl";
+import { generateBeforeNotifying } from "./generationEnqueueControl";
 import {
   usePromptVideoStore,
   RefImage,
@@ -156,7 +160,6 @@ export const PromptBoxVideo = ({
       const referenceImage: RefImage = {
         id: Math.random().toString(36).substring(7),
         url: url,
-        file: new File([], "library-image"),
         mediaToken: imageMediaId,
       };
       setReferenceImages([referenceImage]);
@@ -181,11 +184,15 @@ export const PromptBoxVideo = ({
   const setGenerationCount = usePromptVideoStore((s) => s.setGenerationCount);
   const enterToGenerate = useEnterToGenerateStore((s) => s.enabled);
   const [isEnqueueing, setIsEnqueueing] = useState(false);
+  const isEnqueueingRef = useRef(false);
   const [isFocused, setIsFocused] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const { isFullscreen, openFullscreen, closeFullscreen } =
     useFullscreenPrompt();
   const [isCharactersModalOpen, setIsCharactersModalOpen] = useState(false);
+  const requiresStartImage =
+    selectedModel?.requiresImage === true ||
+    selectedModel?.textToVideoSupported === false;
 
   // Mentions are plain text: with several characters sharing a name,
   // "@Robot" alone can't identify one. Records which token the user actually
@@ -218,7 +225,7 @@ export const PromptBoxVideo = ({
           );
         }
       })
-      .catch(() => {})
+      .catch(() => undefined)
       .finally(() => storeSetLoaded(true));
   }, [charactersLoaded, storeSetCharacters, storeSetLoaded]);
 
@@ -326,7 +333,7 @@ export const PromptBoxVideo = ({
 
   // Held in a ref so the window.resize listener (installed once) always
   // invokes the latest closure — picks up current `isExpanded`, refs, etc.
-  const applyHeightsRef = useRef<() => void>(() => {});
+  const applyHeightsRef = useRef<() => void>(() => undefined);
   applyHeightsRef.current = () => {
     const el = (mentionEditorRef.current ??
       textareaRef.current) as HTMLElement | null;
@@ -385,7 +392,6 @@ export const PromptBoxVideo = ({
       const referenceImage: RefImage = {
         id: Math.random().toString(36).substring(7),
         url: url,
-        file: new File([], "library-image"),
         mediaToken: imageMediaId,
       };
       setReferenceImages([referenceImage]);
@@ -495,13 +501,21 @@ export const PromptBoxVideo = ({
     setReferenceAudios,
   ]);
 
-  // Reset generation count when switching away from seedance 2.0.
-  // Read from store directly to avoid stale closure (same as duration above).
+  // Project the stored count to the selected model's live batch contract.
   useEffect(() => {
     const currentGenerationCount =
       usePromptVideoStore.getState().generationCount;
-    if (selectedModel?.id !== "seedance_2p0" && currentGenerationCount > 1) {
-      setGenerationCount(1);
+    const resolvedGenerationCount = selectedModel
+      ? resolveTargetModelCount(
+          currentGenerationCount,
+          selectedModel.predefinedGenerationCounts,
+          selectedModel.minGenerationCount,
+          selectedModel.maxGenerationCount,
+          selectedModel.defaultGenerationCount,
+        )
+      : 1;
+    if (currentGenerationCount !== resolvedGenerationCount) {
+      setGenerationCount(resolvedGenerationCount);
     }
   }, [selectedModel]);
 
@@ -898,6 +912,7 @@ export const PromptBoxVideo = ({
     <KeyframeCards
       firstFrame={firstFrameItem}
       lastFrame={lastFrameItem}
+      showFirstFrame={referenceCapabilities.supportsStartFrame}
       showLastFrame={referenceCapabilities.supportsEndFrame}
       onFirstAddActions={
         referenceCapabilities.supportsStartFrame
@@ -927,9 +942,15 @@ export const PromptBoxVideo = ({
           onSelect: () => deck.openGallery("end"),
         },
       ]}
-      onRemoveFirst={() => deck.replaceImages([])}
+      onRemoveFirst={
+        referenceCapabilities.supportsStartFrame
+          ? () => deck.replaceImages([])
+          : undefined
+      }
       onRemoveLast={() => setEndFrameImage(undefined)}
-      onSwap={handleSwapFrames}
+      onSwap={
+        referenceCapabilities.supportsStartFrame ? handleSwapFrames : undefined
+      }
     />
   );
 
@@ -1172,6 +1193,7 @@ export const PromptBoxVideo = ({
     ) ?? 1000;
 
   const handleEnqueue = async () => {
+    if (isEnqueueingRef.current) return;
     if (!prompt.trim()) {
       console.warn("Cannot generate video: prompt is empty");
       toast.error("Please enter a prompt to generate video");
@@ -1190,15 +1212,77 @@ export const PromptBoxVideo = ({
       return;
     }
 
+    const currentReferenceState = usePromptVideoStore.getState();
+    const sentMediaProjection = projectPromptVideoReferences(
+      selectedModel,
+      currentReferenceState,
+    );
+    const submittedImages = prepareMediaReferencesForSubmission(
+      sentMediaProjection.referenceImages,
+    );
+    const submittedVideos = prepareMediaReferencesForSubmission(
+      sentMediaProjection.referenceVideos,
+    );
+    const submittedAudios = prepareMediaReferencesForSubmission(
+      sentMediaProjection.referenceAudios,
+    );
+    const submittedEndFrames = prepareMediaReferencesForSubmission(
+      sentMediaProjection.endFrameImage
+        ? [sentMediaProjection.endFrameImage]
+        : [],
+    );
+    if (
+      !submittedImages ||
+      !submittedVideos ||
+      !submittedAudios ||
+      !submittedEndFrames
+    ) {
+      toast.error("Every reference must finish uploading before generation");
+      return;
+    }
     const requestReferenceProjection = projectPromptVideoReferences(
       selectedModel,
-      usePromptVideoStore.getState(),
+      {
+        ...currentReferenceState,
+        inputMode: sentMediaProjection.inputMode,
+        referenceImages: submittedImages,
+        endFrameImage: submittedEndFrames[0],
+        referenceVideos: submittedVideos,
+        referenceAudios: submittedAudios,
+      },
     );
     const requestIsReferenceMode =
       requestReferenceProjection.inputMode === "reference";
 
+    const referenceStatus = validateRecreatedVideoReferences(
+      {
+        imageCount: requestReferenceProjection.referenceImages.length,
+        hasEndFrame: !!requestReferenceProjection.endFrameImage,
+        videoDurations: requestReferenceProjection.referenceVideos.map(
+          (video) => video.duration,
+        ),
+        audioDurations: requestReferenceProjection.referenceAudios.map(
+          (audio) => audio.duration,
+        ),
+      },
+      requestIsReferenceMode ? "reference" : "keyframe",
+      {
+        ...requestReferenceProjection.capabilities,
+        requiresStartFrame: requiresStartImage,
+      },
+    );
+    if (referenceStatus !== "valid") {
+      toast.error(
+        referenceStatus === "invalid-video-duration" ||
+          referenceStatus === "invalid-audio-duration"
+          ? "Could not verify every reference duration. Remove the unreadable reference and try again."
+          : "Reference media exceeds or conflicts with this model's capabilities.",
+      );
+      return;
+    }
+
     if (
-      selectedModel.requiresImage &&
+      requiresStartImage &&
       requestReferenceProjection.referenceImages.length === 0
     ) {
       console.warn("Cannot generate video: no reference image provided");
@@ -1230,145 +1314,144 @@ export const PromptBoxVideo = ({
       return;
     }
 
+    const count = resolveTargetModelCount(
+      currentReferenceState.generationCount,
+      selectedModel.predefinedGenerationCounts,
+      selectedModel.minGenerationCount,
+      selectedModel.maxGenerationCount,
+      selectedModel.defaultGenerationCount,
+    );
+    isEnqueueingRef.current = true;
     setIsEnqueueing(true);
 
-    gtagEvent("enqueue_video");
+    try {
+      gtagEvent("enqueue_video");
 
-    const isSeedance2 = selectedModel.id === "seedance_2p0";
-    const count = isSeedance2 ? generationCount : 1;
+      const buildRequest = (subscriberId: string): GenerateVideoRequest => {
+        const request: GenerateVideoRequest = {
+          model: selectedModel,
+          prompt: prompt,
+          ...requestReferenceProjection.requestMedia,
+          video_batch_count: count,
+          frontend_caller: "image_to_video",
+          frontend_subscriber_id: subscriberId,
+        };
 
-    setTimeout(() => {
-      // TODO(bt,2025-05-08): This is a hack so we don't accidentally wind up with a permanently disabled prompt box if
-      // the backend hangs on a given request.
-      console.debug("Turn off blocking of prompt box...");
-      setIsEnqueueing(false);
-    }, 10000);
-
-    const buildRequest = (subscriberId: string): GenerateVideoRequest => {
-      let request: GenerateVideoRequest = {
-        model: selectedModel,
-        prompt: prompt,
-        ...requestReferenceProjection.requestMedia,
-        frontend_caller: "image_to_video",
-        frontend_subscriber_id: subscriberId,
-      };
-
-      if (!!selectedProvider) {
-        request.provider = selectedProvider;
-      }
-
-      if (selectedModel.generateWithSound) {
-        request.generate_audio = !!generateWithSound;
-      }
-
-      // Extract character tokens from @-mentions in prompt, resolving to
-      // exactly one token per mentioned name. Several characters can share a
-      // name; prefer the user's explicit pick (mentionSelections), else the
-      // newest (store is newest-first).
-      // Use a word-boundary regex so `@Bob` doesn't match inside `@Bob2`.
-      const mentionedTokens = (() => {
-        if (activeCharacters.length === 0) return [];
-        const byName = new Map<string, StoredCharacter[]>();
-        for (const c of activeCharacters) {
-          byName.set(c.name, [...(byName.get(c.name) ?? []), c]);
+        if (selectedProvider) {
+          request.provider = selectedProvider;
         }
-        const names = [...byName.keys()].sort((a, b) => b.length - a.length);
-        const tokens: string[] = [];
-        for (const name of names) {
-          const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          if (!new RegExp(`@${escaped}(?!\\w)`).test(prompt)) continue;
-          const candidates = byName.get(name)!;
-          const chosen =
-            candidates.find(
-              (c) => c.character_token === mentionSelections[name],
-            ) ?? candidates[0];
-          tokens.push(chosen.character_token);
+
+        if (selectedModel.generateWithSound) {
+          request.generate_audio = !!generateWithSound;
         }
-        return tokens;
-      })();
-      if (mentionedTokens.length > 0) {
-        request.reference_character_tokens = mentionedTokens;
-      }
 
-      // Resolve again at request construction time rather than trusting that
-      // the model/image synchronization effect has already updated the store.
-      if (requestDuration !== null) {
-        request.duration_seconds = requestDuration;
-      }
-
-      // Pass the chosen resolution when the model exposes a resolution picker.
-      // Guarded on `resolutionOptions` so a stale store value (left over from a
-      // model that did support resolution) isn't sent for one that doesn't.
-      if (selectedModel.resolutionOptions?.length) {
-        const mappedResolution =
-          RESOLUTION_STRING_TO_COMMON[resolution as string];
-        if (mappedResolution) {
-          request.resolution = mappedResolution;
+        // Extract character tokens from @-mentions in prompt, resolving to
+        // exactly one token per mentioned name. Several characters can share a
+        // name; prefer the user's explicit pick (mentionSelections), else the
+        // newest (store is newest-first).
+        // Use a word-boundary regex so `@Bob` doesn't match inside `@Bob2`.
+        const mentionedTokens = (() => {
+          if (activeCharacters.length === 0) return [];
+          const byName = new Map<string, StoredCharacter[]>();
+          for (const c of activeCharacters) {
+            byName.set(c.name, [...(byName.get(c.name) ?? []), c]);
+          }
+          const names = [...byName.keys()].sort((a, b) => b.length - a.length);
+          const tokens: string[] = [];
+          for (const name of names) {
+            const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            if (!new RegExp(`@${escaped}(?!\\w)`).test(prompt)) continue;
+            const candidates = byName.get(name)!;
+            const chosen =
+              candidates.find(
+                (c) => c.character_token === mentionSelections[name],
+              ) ?? candidates[0];
+            tokens.push(chosen.character_token);
+          }
+          return tokens;
+        })();
+        if (mentionedTokens.length > 0) {
+          request.reference_character_tokens = mentionedTokens;
         }
-      }
 
-      switch (selectedModel?.tauriId) {
-        case "grok_video": // Legacy id
-        case "grok_imagine_video":
-          request.grok_aspect_ratio = getGrokAspectRatio();
-          break;
+        // Resolve again at request construction time rather than trusting that
+        // the model/image synchronization effect has already updated the store.
+        if (requestDuration !== null) {
+          request.duration_seconds = requestDuration;
+        }
 
-        case "sora_2":
-          request.sora_orientation =
-            resolution === "720p" ? "landscape" : "portrait";
-          break;
-      }
-
-      if (selectedModel.supportsCommonAspectRatio) {
-        const selectedOption = selectedModel.sizeOptions?.find(
-          (option) => option.textLabel === aspectRatio,
-        );
-
-        if (selectedOption) {
-          request.aspect_ratio =
-            selectedOption.tauriValue as typeof request.aspect_ratio;
-        } else {
-          const maybeDefault = selectedModel.sizeOptions[0];
-          if (!!maybeDefault) {
-            request.aspect_ratio =
-              maybeDefault.tauriValue as typeof request.aspect_ratio;
+        // Pass the chosen resolution when the model exposes a resolution picker.
+        // Guarded on `resolutionOptions` so a stale store value (left over from a
+        // model that did support resolution) isn't sent for one that doesn't.
+        if (selectedModel.resolutionOptions?.length) {
+          const mappedResolution =
+            RESOLUTION_STRING_TO_COMMON[resolution as string];
+          if (mappedResolution) {
+            request.resolution = mappedResolution;
           }
         }
-      }
 
-      return request;
-    };
+        switch (selectedModel?.tauriId) {
+          case "grok_video": // Legacy id
+          case "grok_imagine_video":
+            request.grok_aspect_ratio = getGrokAspectRatio();
+            break;
 
-    window.__storeTaskEnqueueMeta?.({
-      prompt,
-      refImageUrls: requestReferenceProjection.referenceImages
-        .map((img) => img.url)
-        .filter(Boolean),
-      modelType: (selectedModel as any)?.tauriId || String(selectedModel),
-      timestamp: Date.now(),
-    });
+          case "sora_2":
+            request.sora_orientation =
+              resolution === "720p" ? "landscape" : "portrait";
+            break;
+        }
 
-    const subscriberIds: string[] = [];
-    const enqueuePromises: Promise<unknown>[] = [];
+        if (selectedModel.supportsCommonAspectRatio) {
+          const selectedOption = selectedModel.sizeOptions?.find(
+            (option) => option.textLabel === aspectRatio,
+          );
 
-    for (let i = 0; i < count; i++) {
+          if (selectedOption) {
+            request.aspect_ratio =
+              selectedOption.tauriValue as typeof request.aspect_ratio;
+          } else {
+            const maybeDefault = selectedModel.sizeOptions[0];
+            if (maybeDefault) {
+              request.aspect_ratio =
+                maybeDefault.tauriValue as typeof request.aspect_ratio;
+            }
+          }
+        }
+
+        return request;
+      };
+
       const subscriberId = crypto.randomUUID
         ? crypto.randomUUID()
         : Math.random().toString(36).slice(2);
-      subscriberIds.push(subscriberId);
-      enqueuePromises.push(GenerateVideo(buildRequest(subscriberId)));
+      const subscriberIds = [subscriberId];
+
+      const enqueueAttempt = await generateBeforeNotifying(
+        () => GenerateVideo(buildRequest(subscriberId)),
+        () => {
+          window.__storeTaskEnqueueMeta?.({
+            prompt,
+            refImageUrls: requestReferenceProjection.referenceImages
+              .map((img) => img.url)
+              .filter(Boolean),
+            modelType: (selectedModel as any)?.tauriId || String(selectedModel),
+            timestamp: Date.now(),
+            batchCount: count,
+          });
+          return onEnqueuePressed?.(prompt, subscriberIds);
+        },
+      );
+      if (!enqueueAttempt.ok) {
+        console.error("PromptBoxVideo - enqueue failed", enqueueAttempt.error);
+        toast.error("Failed to start video generation. Please try again.");
+        return;
+      }
+    } finally {
+      isEnqueueingRef.current = false;
+      setIsEnqueueing(false);
     }
-
-    try {
-      await Promise.all(enqueuePromises);
-    } catch (err) {
-      console.error("PromptBoxVideo - enqueue failed", err);
-      toast.error("Failed to start video generation. Please try again.");
-    }
-
-    onEnqueuePressed?.(prompt, subscriberIds);
-
-    setIsEnqueueing(false);
   };
 
   const getCurrentAspectRatioIcon = (): SizeIconOption => {
@@ -1409,7 +1492,7 @@ export const PromptBoxVideo = ({
     if (isSubmitCombo) {
       e.preventDefault();
 
-      if (selectedModel?.requiresImage && referenceImages.length === 0) {
+      if (requiresStartImage && referenceImages.length === 0) {
         return;
       }
 
@@ -1441,7 +1524,7 @@ export const PromptBoxVideo = ({
   };
 
   const modelNeedsAnImageButNoneAreSelected =
-    selectedModel?.requiresImage && referenceImages.length === 0;
+    requiresStartImage && referenceImages.length === 0;
 
   // Character button (seedance_2p0 only), reused in the fullscreen footer.
   const characterButtonEl =
@@ -1522,10 +1605,7 @@ export const PromptBoxVideo = ({
                     const isSubmitCombo = enterToGenerate && !e.shiftKey;
                     if (isSubmitCombo) {
                       e.preventDefault();
-                      if (
-                        selectedModel?.requiresImage &&
-                        referenceImages.length === 0
-                      )
+                      if (requiresStartImage && referenceImages.length === 0)
                         return;
                       if (!prompt.trim()) return;
                       handleEnqueue();
@@ -1668,9 +1748,11 @@ export const PromptBoxVideo = ({
                 disabled={!hasClearableContent}
                 confirmClear={hasAttachedRefs}
               />
-              {selectedModel?.id === "seedance_2p0" && (
+              {selectedModel && selectedModel.maxGenerationCount > 1 && (
                 <VideoGenerationCountPicker
-                  maxCount={4}
+                  minCount={selectedModel.minGenerationCount}
+                  maxCount={selectedModel.maxGenerationCount}
+                  options={selectedModel.predefinedGenerationCounts}
                   currentCount={generationCount}
                   handleCountChange={setGenerationCount}
                 />
@@ -1688,7 +1770,12 @@ export const PromptBoxVideo = ({
                     disabled={!prompt.trim()}
                     loading={isEnqueueing}
                     credits={
-                      credits != null ? credits * generationCount : credits
+                      credits != null
+                        ? credits *
+                          ((selectedModel?.maxGenerationCount ?? 1) > 1
+                            ? generationCount
+                            : 1)
+                        : credits
                     }
                   />
                 </div>

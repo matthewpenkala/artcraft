@@ -1,6 +1,12 @@
 import { useState, useRef, useEffect, useMemo, ReactNode } from "react";
 import { useSignals } from "@preact/signals-react/runtime";
-import { JobContextType, UploaderState } from "@storyteller/common";
+import {
+  JobContextType,
+  UploaderState,
+  prepareMediaReferencesForSubmission,
+  resolveTargetModelCount,
+  resolveTargetModelOption,
+} from "@storyteller/common";
 import { toast } from "@storyteller/ui-toaster";
 import { PopoverMenu, PopoverItem } from "@storyteller/ui-popover";
 import { Tooltip } from "@storyteller/ui-tooltip";
@@ -24,6 +30,7 @@ import {
 import { PromptFullscreenButton } from "./PromptFullscreenButton";
 import { PromptClearAllButton } from "./PromptClearAllButton";
 import { gtagEvent } from "@storyteller/google-analytics";
+import { generateBeforeNotifying } from "./generationEnqueueControl";
 import { twMerge } from "tailwind-merge";
 import { GenerationProvider } from "@storyteller/api-enums";
 import { AspectRatioPicker } from "./common/AspectRatioPicker";
@@ -91,7 +98,6 @@ export const PromptBoxImage = ({
       const referenceImage: RefImage = {
         id: Math.random().toString(36).substring(7),
         url: url,
-        file: new File([], "library-image"),
         mediaToken: imageMediaId,
       };
       setReferenceImages([referenceImage]);
@@ -107,6 +113,7 @@ export const PromptBoxImage = ({
   const generationCount = usePromptImageStore((s) => s.generationCount);
   const setGenerationCount = usePromptImageStore((s) => s.setGenerationCount);
   const [isEnqueueing, setIsEnqueueing] = useState(false);
+  const isEnqueueingRef = useRef(false);
   const [isFocused, setIsFocused] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -264,7 +271,6 @@ export const PromptBoxImage = ({
       const referenceImage: RefImage = {
         id: Math.random().toString(36).substring(7),
         url: url,
-        file: new File([], "library-image"),
         mediaToken: imageMediaId,
       };
       setReferenceImages([referenceImage]);
@@ -339,6 +345,7 @@ export const PromptBoxImage = ({
   const maxLen = selectedModel?.maxPromptLength ?? 1000;
 
   const handleEnqueue = async () => {
+    if (isEnqueueingRef.current) return;
     if (!prompt.trim()) {
       console.warn("Cannot generate image: prompt is empty");
       return;
@@ -355,9 +362,31 @@ export const PromptBoxImage = ({
       return;
     }
 
+    const currentState = usePromptImageStore.getState();
+    const submittedReferences = prepareMediaReferencesForSubmission(
+      selectedModel.canUseImagePrompt
+        ? currentState.referenceImages.slice(
+            0,
+            selectedModel.maxImagePromptCount,
+          )
+        : [],
+    );
+    if (!submittedReferences) {
+      toast.error("Every reference must finish uploading before generation");
+      return;
+    }
+    const requestGenerationCount = resolveTargetModelCount(
+      currentState.generationCount,
+      selectedModel.predefinedGenerationCounts,
+      1,
+      selectedModel.maxGenerationCount,
+      selectedModel.defaultGenerationCount,
+    );
+
     console.debug("Selected model:", selectedModel);
     console.debug("Prompt:", prompt);
 
+    isEnqueueingRef.current = true;
     setIsEnqueueing(true);
 
     gtagEvent("enqueue_image");
@@ -366,64 +395,79 @@ export const PromptBoxImage = ({
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2);
 
-    setTimeout(() => {
-      console.debug("Turn off blocking of prompt box...");
-      setIsEnqueueing(false);
-    }, 10000);
-
     try {
       const request: GenerateImageRequest = {
         prompt: prompt,
         model: selectedModel,
-        batch_size: generationCount,
+        batch_size: requestGenerationCount,
         frontend_caller: "text_to_image",
         frontend_subscriber_id: subscriberId,
       };
 
-      if (!!selectedProvider) {
+      if (selectedProvider) {
         request.provider = selectedProvider;
       }
 
       if (selectedModel?.supportsNewAspectRatio()) {
-        request.aspect_ratio = commonAspectRatio;
+        request.aspect_ratio = resolveTargetModelOption(
+          currentState.commonAspectRatio,
+          selectedModel.aspectRatios,
+          selectedModel.defaultAspectRatio,
+        ) as typeof request.aspect_ratio;
       }
 
       if (selectedModel?.supportsNewResolution()) {
-        request.resolution = commonResolution;
+        request.resolution = resolveTargetModelOption(
+          currentState.commonResolution,
+          selectedModel.resolutions,
+          selectedModel.defaultResolution,
+        ) as typeof request.resolution;
       }
 
       if (selectedModel?.supportsQuality()) {
-        request.quality = commonQuality ?? selectedModel.defaultQuality;
+        request.quality = resolveTargetModelOption(
+          currentState.commonQuality,
+          selectedModel.qualityOptions,
+          selectedModel.defaultQuality,
+        ) as typeof request.quality;
       }
 
-      if (
-        selectedModel?.canUseImagePrompt &&
-        !!referenceImages &&
-        referenceImages.length > 0
-      ) {
-        request.image_media_tokens = referenceImages
-          .map((image) => image.mediaToken)
-          .filter((t) => t.length > 0);
+      if (selectedModel?.canUseImagePrompt && submittedReferences.length > 0) {
+        request.image_media_tokens = submittedReferences.map(
+          (image) => image.mediaToken,
+        );
       }
-
-      window.__storeTaskEnqueueMeta?.({
-        prompt,
-        refImageUrls: referenceImages?.map((img) => img.url).filter(Boolean),
-        modelType: (selectedModel as any)?.tauriId || String(selectedModel),
-        timestamp: Date.now(),
-        batchCount: generationCount,
-      });
 
       console.debug("Image Generation Request", request);
 
-      const generateResponse = await GenerateImage(request);
-      console.debug("PromptBoxImage - generateResponse", generateResponse);
-
-      await onEnqueuePressed?.(prompt, generationCount, subscriberId);
+      const enqueueAttempt = await generateBeforeNotifying(
+        () => GenerateImage(request),
+        (generateResponse) => {
+          window.__storeTaskEnqueueMeta?.({
+            prompt,
+            refImageUrls: submittedReferences
+              .map((img) => img.url)
+              .filter(Boolean),
+            modelType: (selectedModel as any)?.tauriId || String(selectedModel),
+            timestamp: Date.now(),
+            batchCount: requestGenerationCount,
+          });
+          console.debug("PromptBoxImage - generateResponse", generateResponse);
+          return onEnqueuePressed?.(
+            prompt,
+            requestGenerationCount,
+            subscriberId,
+          );
+        },
+      );
+      if (!enqueueAttempt.ok) {
+        throw enqueueAttempt.error;
+      }
     } catch (err) {
       console.error("PromptBoxImage - enqueue failed", err);
       toast.error("Failed to start image generation. Please try again.");
     } finally {
+      isEnqueueingRef.current = false;
       setIsEnqueueing(false);
     }
   };

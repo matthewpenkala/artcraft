@@ -56,6 +56,7 @@ interface ImagePromptRowProps {
   // Video mode props
   isVideo?: boolean;
   isReferenceMode?: boolean;
+  showStartFrameSection?: boolean;
   endFrameImage?: RefImage;
   setEndFrameImage?: (image?: RefImage) => void;
   showEndFrameSection?: boolean;
@@ -71,6 +72,7 @@ export const ImagePromptRow = ({
   className,
   isVideo,
   isReferenceMode,
+  showStartFrameSection = true,
   endFrameImage,
   setEndFrameImage,
   showEndFrameSection,
@@ -101,6 +103,7 @@ export const ImagePromptRow = ({
     maxImagePromptCount,
     isVideo,
     isReferenceMode,
+    showStartFrameSection,
     showEndFrameSection,
     setEndFrameImage,
   });
@@ -108,6 +111,7 @@ export const ImagePromptRow = ({
     maxImagePromptCount,
     isVideo,
     isReferenceMode,
+    showStartFrameSection,
     showEndFrameSection,
     setEndFrameImage,
   };
@@ -116,6 +120,7 @@ export const ImagePromptRow = ({
     maxImagePromptCount,
     isVideo,
     isReferenceMode,
+    showStartFrameSection,
   ].join("|");
   const endPolicySignature = [
     isVideo,
@@ -159,7 +164,9 @@ export const ImagePromptRow = ({
   };
 
   const imageUploadSupported = () =>
-    mountedRef.current && livePolicyRef.current.maxImagePromptCount > 0;
+    mountedRef.current &&
+    livePolicyRef.current.showStartFrameSection === true &&
+    livePolicyRef.current.maxImagePromptCount > 0;
   const endUploadSupported = () => {
     const policy = livePolicyRef.current;
     return (
@@ -407,6 +414,7 @@ export const ImagePromptRow = ({
   };
 
   const canAddMore =
+    showStartFrameSection &&
     referenceImages.length + uploadingImages.length < maxImagePromptCount;
 
   // Context-aware labels
@@ -426,14 +434,16 @@ export const ImagePromptRow = ({
 
   return (
     <>
-      <input
-        type="file"
-        ref={fileInputRef}
-        className="hidden"
-        accept="image/*"
-        onChange={handleFileUpload}
-        multiple={maxImagePromptCount > 1}
-      />
+      {showStartFrameSection && (
+        <input
+          type="file"
+          ref={fileInputRef}
+          className="hidden"
+          accept="image/*"
+          onChange={handleFileUpload}
+          multiple={maxImagePromptCount > 1}
+        />
+      )}
       {showEndFrameSection && (
         <input
           type="file"
@@ -453,82 +463,86 @@ export const ImagePromptRow = ({
         onClick={stopIfInside}
         onPointerDown={stopIfInside}
       >
-        <div className="flex min-w-0 flex-1 gap-2 px-3 py-2">
-          <div className="flex grow flex-col gap-1 min-w-32">
-            <div className="flex items-center gap-2 text-white/90">
-              <ImageIcon  className="h-3.5 w-3.5" />
-              <span className="flex items-center gap-1.5 text-sm font-medium">
-                {sectionLabel}
-                {showCount && (
-                  <span className="font-semibold text-white/60">
-                    (
-                    {maxImagePromptCount === Number.MAX_SAFE_INTEGER
-                      ? usedSlots
-                      : `${usedSlots}/${maxImagePromptCount}`}
-                    )
-                  </span>
-                )}
+        {showStartFrameSection && (
+          <div className="flex min-w-0 flex-1 gap-2 px-3 py-2">
+            <div className="flex grow flex-col gap-1 min-w-32">
+              <div className="flex items-center gap-2 text-white/90">
+                <ImageIcon className="h-3.5 w-3.5" />
+                <span className="flex items-center gap-1.5 text-sm font-medium">
+                  {sectionLabel}
+                  {showCount && (
+                    <span className="font-semibold text-white/60">
+                      (
+                      {maxImagePromptCount === Number.MAX_SAFE_INTEGER
+                        ? usedSlots
+                        : `${usedSlots}/${maxImagePromptCount}`}
+                      )
+                    </span>
+                  )}
+                </span>
+              </div>
+              <span className="text-[13px] text-white/60">
+                {sectionSubtitle}
               </span>
             </div>
-            <span className="text-[13px] text-white/60">{sectionSubtitle}</span>
-          </div>
 
-          <div className="flex flex-wrap gap-2">
-            {allowReorder ? (
-              <DndContext
-                sensors={sensors}
-                collisionDetection={closestCenter}
-                onDragEnd={handleDragEnd}
-              >
-                <SortableContext
-                  items={referenceImages
-                    .slice(0, maxImagePromptCount)
-                    .map((img) => img.id)}
-                  strategy={horizontalListSortingStrategy}
+            <div className="flex flex-wrap gap-2">
+              {allowReorder ? (
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCenter}
+                  onDragEnd={handleDragEnd}
                 >
-                  {referenceImages
-                    .slice(0, maxImagePromptCount)
-                    .map((image) => (
-                      <SortableImage
-                        key={image.id}
-                        image={image}
-                        allowReorder={allowReorder}
-                        onRemove={handleRemoveReference}
-                        onPreview={(img) => setPreviewImage(img)}
-                      />
-                    ))}
-                </SortableContext>
-              </DndContext>
-            ) : (
-              referenceImages
-                .slice(0, maxImagePromptCount)
-                .map((image) => (
-                  <ImageThumbnail
-                    key={image.id}
-                    image={image}
-                    onRemove={handleRemoveReference}
-                    onPreview={(img) => setPreviewImage(img)}
-                  />
-                ))
-            )}
+                  <SortableContext
+                    items={referenceImages
+                      .slice(0, maxImagePromptCount)
+                      .map((img) => img.id)}
+                    strategy={horizontalListSortingStrategy}
+                  >
+                    {referenceImages
+                      .slice(0, maxImagePromptCount)
+                      .map((image) => (
+                        <SortableImage
+                          key={image.id}
+                          image={image}
+                          allowReorder={allowReorder}
+                          onRemove={handleRemoveReference}
+                          onPreview={(img) => setPreviewImage(img)}
+                        />
+                      ))}
+                  </SortableContext>
+                </DndContext>
+              ) : (
+                referenceImages
+                  .slice(0, maxImagePromptCount)
+                  .map((image) => (
+                    <ImageThumbnail
+                      key={image.id}
+                      image={image}
+                      onRemove={handleRemoveReference}
+                      onPreview={(img) => setPreviewImage(img)}
+                    />
+                  ))
+              )}
 
-            {uploadingImages
-              .slice(
-                0,
-                Math.max(0, maxImagePromptCount - referenceImages.length),
-              )
-              .map(({ id, previewUrl }) => (
-                <UploadingThumbnail key={id} previewUrl={previewUrl} />
-              ))}
+              {uploadingImages
+                .slice(
+                  0,
+                  Math.max(0, maxImagePromptCount - referenceImages.length),
+                )
+                .map(({ id, previewUrl }) => (
+                  <UploadingThumbnail key={id} previewUrl={previewUrl} />
+                ))}
 
-            {canAddMore && (
-              <AddButton
-                onUpload={() => fileInputRef.current?.click()}
-                onPickFromLibrary={onPickFromLibrary}
-              />
-            )}
+              {canAddMore && (
+                <AddButton
+                  onUpload={() => fileInputRef.current?.click()}
+                  onPickFromLibrary={onPickFromLibrary}
+                />
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* End frame section */}
         {isVideo && showEndFrameSection && (

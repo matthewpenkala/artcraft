@@ -5,4 +5,5 @@ export * from "./media-duration";
 export * from "./video-cost-estimate";
 export * from "./media-object-url";
 export * from "./media-reference-state";
+export * from "./model-setting";
 export * from "./media-reference-batch";

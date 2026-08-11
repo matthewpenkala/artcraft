@@ -71,5 +71,8 @@ pub struct BatchPromptInfo {
   /// Context images (optional)
   pub maybe_context_images: Option<Vec<GetPromptImageContextItem>>,
 
+  /// False when inaccessible or deleted context media was omitted.
+  pub context_items_complete: bool,
+
   pub created_at: DateTime<Utc>,
 }

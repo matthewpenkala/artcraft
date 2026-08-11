@@ -56,10 +56,7 @@ import {
   mergeRefImages,
   toastMergeRefImagesOutcome,
 } from "../../lib/send-to-prompt";
-import {
-  resolveModelOption,
-  resolveModelCount,
-} from "../../lib/resolve-model-setting";
+import { resolveModelOption } from "../../lib/resolve-model-setting";
 import {
   useOmniGenImageModels,
   OMNI_GENERATE_OUTAGE_MESSAGE,
@@ -76,6 +73,11 @@ import { toast } from "../../components/toast/toast";
 import { useSignupCta } from "../../components/signup-cta-modal";
 import { useInsufficientCredits } from "../../components/insufficient-credits-modal";
 import { SparklesIcon } from "lucide-react";
+import {
+  prepareMediaReferencesForSubmission,
+  resolveTargetModelCount,
+  resolveTargetModelOption,
+} from "@storyteller/common";
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -160,9 +162,10 @@ export default function CreateImage() {
     (v: string) => setUi({ aspectRatio: v }),
     [setUi],
   );
-  const numImages = resolveModelCount(
+  const numImages = resolveTargetModelCount(
     ui.numImages,
     selectedModel?.batch_size_options,
+    selectedModel?.batch_size_min,
     selectedModel?.batch_size_max,
     selectedModel?.batch_size_default,
   );
@@ -190,12 +193,22 @@ export default function CreateImage() {
   );
 
   const [isGenerating, setIsGenerating] = useState(false);
-  const referenceImages = useCreateImageStore((s) => s.referenceImages);
+  const storedReferenceImages = useCreateImageStore((s) => s.referenceImages);
   const setReferenceImages = useCreateImageStore((s) => s.setReferenceImages);
   const [isImagePickerOpen, setIsImagePickerOpen] = useState(false);
   const [isOutputDrawerOpen, setIsOutputDrawerOpen] = useState(false);
   const [pickerSelectedIds, setPickerSelectedIds] = useState<string[]>([]);
-  const maxImageRefs = selectedModel?.image_refs_max ?? 6;
+  const maxImageRefs =
+    selectedModel?.image_refs_supported === true
+      ? (selectedModel.image_refs_max ?? Number.MAX_SAFE_INTEGER)
+      : 0;
+  const referenceImages = useMemo(
+    () =>
+      selectedModel?.image_refs_supported === true
+        ? storedReferenceImages.slice(0, maxImageRefs)
+        : [],
+    [selectedModel?.image_refs_supported, storedReferenceImages, maxImageRefs],
+  );
   const imagePickerMax = Math.max(1, maxImageRefs - referenceImages.length);
 
   useEffect(() => {
@@ -281,6 +294,7 @@ export default function CreateImage() {
     quality: hasQualityOptions ? quality : undefined,
     numImages,
     hasReferenceImages: referenceImages.length > 0,
+    imageMediaTokenCount: referenceImages.length,
   });
 
   const modelItems = useMemo(
@@ -322,35 +336,66 @@ export default function CreateImage() {
   // Warn when a recreated generation's model is missing from the current
   // model list: selectedModel silently falls back to the default model, and
   // the restored prompt/settings may not be valid for it. Verified in its own
-  // effect because the model list may still be loading when the recreate
-  // payload is consumed.
-  const [recreateModelIdToVerify, setRecreateModelIdToVerify] = useState<
-    string | null
-  >(null);
+  const pendingRecreate = useCreateImageStore((s) => s.pendingRecreate);
   useEffect(() => {
-    if (!recreateModelIdToVerify || apiModels.length === 0) return;
-    if (!apiModels.some((m) => m.model === recreateModelIdToVerify)) {
+    if (!pendingRecreate || apiModels.length === 0) return;
+    const payload = pendingRecreate;
+    if (useCreateImageStore.getState().pendingRecreate !== payload) return;
+    const requestedModel = payload.modelId
+      ? apiModels.find((model) => model.model === payload.modelId)
+      : undefined;
+    const targetModel =
+      requestedModel ??
+      apiModels.find((model) => model.model === DEFAULT_MODEL_ID) ??
+      apiModels[0];
+    if (!targetModel) return;
+    const prepared = prepareMediaReferencesForSubmission(
+      payload.referenceImages,
+    );
+    const targetMax =
+      targetModel.image_refs_supported === true
+        ? (targetModel.image_refs_max ?? Number.MAX_SAFE_INTEGER)
+        : 0;
+    if (!prepared || prepared.length > targetMax) {
+      const store = useCreateImageStore.getState();
+      if (store.pendingRecreate !== payload) return;
+      store.setPendingRecreate(null);
+      toast.error("Recreate references are incompatible with this model");
+      return;
+    }
+    const committed = useCreateImageStore.getState().commitPendingRecreate(
+      payload,
+      {
+        selectedModelId: targetModel.model,
+        prompt: payload.prompt,
+        aspectRatio:
+          resolveTargetModelOption(
+            payload.aspectRatio,
+            targetModel.aspect_ratio_options,
+            targetModel.aspect_ratio_default,
+          ) ?? "square",
+        numImages: resolveTargetModelCount(
+          payload.generationCount,
+          targetModel.batch_size_options,
+          targetModel.batch_size_min,
+          targetModel.batch_size_max,
+          targetModel.batch_size_default,
+        ),
+        resolution: resolveTargetModelOption(
+          payload.resolution,
+          targetModel.resolution_options,
+          targetModel.resolution_default,
+        ),
+        quality: targetModel.default_quality ?? undefined,
+      },
+      prepared,
+    );
+    if (committed && payload.modelId && !requestedModel) {
       toast.error(
         "The model used for this generation isn't available anymore. Using the default model instead.",
       );
     }
-    setRecreateModelIdToVerify(null);
-  }, [recreateModelIdToVerify, apiModels]);
-
-  const pendingRecreate = useCreateImageStore((s) => s.pendingRecreate);
-  useEffect(() => {
-    if (!pendingRecreate) return;
-    const payload = useCreateImageStore.getState().consumePendingRecreate();
-    if (!payload) return;
-    setReferenceImages(payload.referenceImages);
-    setUi({
-      prompt: payload.prompt,
-      ...(payload.aspectRatio ? { aspectRatio: payload.aspectRatio } : {}),
-      ...(payload.resolution ? { resolution: payload.resolution } : {}),
-      ...(payload.modelId ? { selectedModelId: payload.modelId } : {}),
-    });
-    if (payload.modelId) setRecreateModelIdToVerify(payload.modelId);
-  }, [pendingRecreate, setUi]);
+  }, [pendingRecreate, apiModels]);
 
   // Consume reference images sent from the library ("Send to prompt").
   // Waits for the model list so the merge applies the real per-model cap —
@@ -463,6 +508,16 @@ export default function CreateImage() {
       return;
     }
 
+    const submittedReferences = prepareMediaReferencesForSubmission(
+      selectedModel.image_refs_supported === true
+        ? referenceImages.slice(0, maxImageRefs)
+        : [],
+    );
+    if (!submittedReferences) {
+      toast.error("Every sent reference image must finish uploading");
+      return;
+    }
+
     setIsGenerating(true);
     const batchId = startBatch(
       prompt,
@@ -472,9 +527,7 @@ export default function CreateImage() {
 
     try {
       const imageMediaTokens = selectedModel.image_refs_supported
-        ? referenceImages
-            .map((img) => img.mediaToken)
-            .filter((t): t is string => typeof t === "string" && t.length > 0)
+        ? submittedReferences.map((image) => image.mediaToken!)
         : undefined;
 
       const result = await enqueueImageGeneration({
@@ -542,6 +595,7 @@ export default function CreateImage() {
     isGenerating,
     selectedModel,
     maxPromptLength,
+    maxImageRefs,
     numImages,
     aspectRatio,
     resolution,

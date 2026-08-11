@@ -168,6 +168,29 @@ describe("video reference capabilities", () => {
     expect(result.referenceAudios.map((item) => item.id)).toEqual(["audio-1"]);
   });
 
+  it("uses the target model limit for the visible and sent image projection after a model switch", () => {
+    const seedanceReferences = Array.from({ length: 30 }, (_, index) => ({
+      id: `image-${index + 1}`,
+    }));
+
+    const grokProjection = projectVideoReferenceMedia(
+      {
+        supportsImageReferences: true,
+        maxReferenceImages: 7,
+      },
+      {
+        inputMode: "reference",
+        referenceImages: seedanceReferences,
+        referenceVideos: [],
+        referenceAudios: [],
+      },
+    );
+
+    expect(grokProjection.referenceImages.map((item) => item.id)).toEqual(
+      seedanceReferences.slice(0, 7).map((item) => item.id),
+    );
+  });
+
   it("applies aggregate video and audio duration limits on model switch", () => {
     const result = projectVideoReferenceMedia(
       {

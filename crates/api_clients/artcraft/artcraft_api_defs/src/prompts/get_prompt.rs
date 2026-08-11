@@ -75,6 +75,9 @@ pub struct PromptInfo {
   /// Context images (optional)
   pub maybe_context_images: Option<Vec<GetPromptImageContextItem>>,
 
+  /// False when inaccessible or deleted context media was omitted.
+  pub context_items_complete: bool,
+
   /// Scheduled / travel prompt (optional)
   pub maybe_travel_prompt: Option<String>,
 

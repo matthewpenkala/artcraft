@@ -19,7 +19,10 @@ export interface Prompts {
   lipsync_enabled: boolean;
   maybe_aspect_ratio: string | null;
   maybe_batch_count: number | null;
+  maybe_bitrate: string | null;
   maybe_context_images: PromptContextImage[] | null;
+  /** False when inaccessible or deleted context media was intentionally omitted. */
+  context_items_complete?: boolean;
   maybe_duration_seconds: number | null;
   maybe_frame_skip: number | null;
   maybe_generate_audio: boolean | null;
