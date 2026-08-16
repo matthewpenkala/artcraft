@@ -5,6 +5,24 @@ import {
 } from "./VideoReferenceCapabilities.js";
 
 describe("video reference capabilities", () => {
+  it("forces reference-only models out of an impossible keyframe mode", () => {
+    const projected = projectVideoReferenceMedia(
+      {
+        startFrame: false,
+        supportsImageReferences: true,
+      },
+      {
+        inputMode: "keyframe",
+        referenceImages: ["image"],
+        referenceVideos: [],
+        referenceAudios: [],
+      },
+    );
+
+    expect(projected.inputMode).toBe("reference");
+    expect(projected.referenceImages).toEqual(["image"]);
+  });
+
   it.each([
     ["image", true, false, false],
     ["video", false, true, false],

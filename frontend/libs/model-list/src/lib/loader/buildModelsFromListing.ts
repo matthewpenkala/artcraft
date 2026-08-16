@@ -235,6 +235,12 @@ const mergedVideoModel = (
 ): VideoModel => {
   const aspectRatios = knownValues(m.aspect_ratio_options, COMMON_ASPECT_RATIO_VALUES);
   const fullName = m.full_name ?? o?.fullName ?? m.model;
+  const supportsImageReferences =
+    m.image_references_supported ?? o?.supportsImageReferences ?? false;
+  const supportsVideoReferences =
+    m.video_references_supported ?? o?.supportsVideoReferences ?? false;
+  const supportsAudioReferences =
+    m.audio_references_supported ?? o?.supportsAudioReferences ?? false;
 
   return new VideoModel({
     // Identity. Keep the overlay's `id` (BY_ID lookups / history) when known.
@@ -272,19 +278,26 @@ const mergedVideoModel = (
       m.duration_seconds_max_with_image_references ??
       o?.maxDurationWithImageReferences,
     defaultDuration: m.duration_seconds_default ?? o?.defaultDuration,
-    supportsImageReferences:
-      m.image_references_supported ?? o?.supportsImageReferences,
-    supportsVideoReferences:
-      m.video_references_supported ?? o?.supportsVideoReferences,
-    supportsAudioReferences:
-      m.audio_references_supported ?? o?.supportsAudioReferences,
-    maxReferenceImages: m.image_references_max ?? o?.maxReferenceImages,
-    maxReferenceVideos: m.video_references_max ?? o?.maxReferenceVideos,
-    maxVideoRefDuration:
-      m.video_references_max_total_duration_seconds ?? o?.maxVideoRefDuration,
-    maxReferenceAudios: m.audio_references_max ?? o?.maxReferenceAudios,
-    maxAudioRefDuration:
-      m.audio_references_max_total_duration_seconds ?? o?.maxAudioRefDuration,
+    supportsImageReferences,
+    supportsVideoReferences,
+    supportsAudioReferences,
+    maxReferenceImages: supportsImageReferences
+      ? (m.image_references_max ?? o?.maxReferenceImages)
+      : 0,
+    maxReferenceVideos: supportsVideoReferences
+      ? (m.video_references_max ?? o?.maxReferenceVideos)
+      : 0,
+    maxVideoRefDuration: supportsVideoReferences
+      ? (m.video_references_max_total_duration_seconds ??
+        o?.maxVideoRefDuration)
+      : 0,
+    maxReferenceAudios: supportsAudioReferences
+      ? (m.audio_references_max ?? o?.maxReferenceAudios)
+      : 0,
+    maxAudioRefDuration: supportsAudioReferences
+      ? (m.audio_references_max_total_duration_seconds ??
+        o?.maxAudioRefDuration)
+      : 0,
     resolutionOptions:
       m.resolution_options?.map(resolutionLabel) ?? o?.resolutionOptions,
     defaultResolution: m.resolution_default

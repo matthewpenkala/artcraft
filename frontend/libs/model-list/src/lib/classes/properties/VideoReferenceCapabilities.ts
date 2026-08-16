@@ -192,8 +192,11 @@ export const projectVideoReferenceMedia = <
   state: VideoReferenceMediaState<TImage, TVideo, TAudio>,
 ): VideoReferenceMediaProjection<TImage, TVideo, TAudio> => {
   const capabilities = getEffectiveVideoReferenceCapabilities(source);
+  const referenceOnly =
+    !capabilities.supportsStartFrame && capabilities.supportsReferenceMode;
   const inputMode =
-    state.inputMode === "reference" && capabilities.supportsReferenceMode
+    (state.inputMode === "reference" || referenceOnly) &&
+    capabilities.supportsReferenceMode
       ? "reference"
       : "keyframe";
 

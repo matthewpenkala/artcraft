@@ -218,6 +218,34 @@ describe("buildVideoModelsFromListing reference capabilities", () => {
     });
   });
 
+  it("zeros stale advertised limits when reference media is unsupported", () => {
+    const [model] = buildVideoModelsFromListing(
+      [overlayReferenceModel()],
+      [
+        {
+          model: "fictional_reference_video",
+          image_references_supported: false,
+          image_references_max: 9,
+          video_references_supported: false,
+          video_references_max: 3,
+          video_references_max_total_duration_seconds: 15,
+          audio_references_supported: false,
+          audio_references_max: 2,
+          audio_references_max_total_duration_seconds: 15,
+        },
+      ],
+      ["fictional_reference_video"],
+    );
+
+    expect(model).toMatchObject({
+      maxReferenceImages: 0,
+      maxReferenceVideos: 0,
+      maxVideoRefDuration: 0,
+      maxReferenceAudios: 0,
+      maxAudioRefDuration: 0,
+    });
+  });
+
   it("uses a known overlay only when listing fields are absent", () => {
     const [model] = buildVideoModelsFromListing(
       [overlayReferenceModel()],
