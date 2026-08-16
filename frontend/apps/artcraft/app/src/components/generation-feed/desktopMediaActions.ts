@@ -274,6 +274,8 @@ const modelMatches = (
   requested: string,
 ): boolean => model.id === requested || model.tauriId === requested;
 
+class UnavailableRecreateModelError extends Error {}
+
 const selectImageRecreateModel = (
   models: readonly ImageModel[],
   requested: string | null,
@@ -282,12 +284,17 @@ const selectImageRecreateModel = (
   const restored = requested
     ? eligible.find((model) => modelMatches(model, requested))
     : undefined;
+  if (requested && !restored) {
+    throw new UnavailableRecreateModelError(
+      "The model used for this generation is not available in this desktop build.",
+    );
+  }
   const model =
     restored ??
     eligible.find((candidate) => modelMatches(candidate, "nano_banana_pro")) ??
     eligible[0];
   if (!model) throw new Error("No image generation model is available");
-  return { model, usedFallback: !!requested && !restored };
+  return { model, usedFallback: false };
 };
 
 const selectVideoRecreateModel = (
@@ -298,12 +305,17 @@ const selectVideoRecreateModel = (
   const restored = requested
     ? eligible.find((model) => modelMatches(model, requested))
     : undefined;
+  if (requested && !restored) {
+    throw new UnavailableRecreateModelError(
+      "The model used for this generation is not available in this desktop build.",
+    );
+  }
   const model =
     restored ??
     eligible.find((candidate) => modelMatches(candidate, "seedance_2p0")) ??
     eligible[0];
   if (!model) throw new Error("No video generation model is available");
-  return { model, usedFallback: !!requested && !restored };
+  return { model, usedFallback: false };
 };
 
 const inferDesktopVideoInputMode = (
@@ -541,6 +553,15 @@ const closeDesktopGallery = () => {
   galleryModalLightboxVisible.value = false;
 };
 
+const reportDesktopRecreateError = (error: unknown) => {
+  console.error("Desktop Recreate failed", error);
+  toast.error(
+    error instanceof UnavailableRecreateModelError
+      ? error.message
+      : "Could not restore the original generation settings.",
+  );
+};
+
 async function applyDesktopRecreate(
   data: { promptData: Prompts; mediaClass: "image" | "video" },
   requestId: number,
@@ -612,8 +633,7 @@ export async function applyRecreateFromPromptData(data: {
     );
   } catch (error) {
     if (requestId === latestDesktopRecreateRequest) {
-      console.error("Desktop Recreate failed", error);
-      toast.error("Could not restore the original generation settings.");
+      reportDesktopRecreateError(error);
     }
   }
 }
@@ -655,8 +675,7 @@ export async function applyRecreateFromPromptToken(
     );
   } catch (error) {
     if (requestId === latestDesktopRecreateRequest) {
-      console.error("Desktop Recreate failed", error);
-      toast.error("Could not restore the original generation settings.");
+      reportDesktopRecreateError(error);
     }
   }
 }

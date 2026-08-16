@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("react-hot-toast", () => ({
   default: { error: vi.fn(), success: vi.fn(), loading: vi.fn() },
@@ -48,7 +48,18 @@ import {
   SizeIconOption,
   VideoModel,
 } from "@storyteller/model-list";
-import { buildDesktopRecreateTransaction } from "./desktopMediaActions";
+import toast from "react-hot-toast";
+import { useModelsStore } from "@storyteller/tauri-api";
+import {
+  usePromptImageStore,
+  usePromptVideoStore,
+} from "@storyteller/ui-promptbox";
+import { useClassyModelSelectorStore } from "@storyteller/ui-model-selector";
+import { useTabStore } from "~/pages/Stores/TabState";
+import {
+  applyRecreateFromPromptData,
+  buildDesktopRecreateTransaction,
+} from "./desktopMediaActions";
 
 const imageModel = () =>
   new ImageModel({
@@ -144,13 +155,17 @@ const hydration = {
   probeAudioDuration: async () => null,
 };
 
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
 describe("desktop Recreate transaction builder", () => {
-  it("hydrates audio/video, dedupes per kind, and normalizes against the actual fallback", async () => {
+  it("hydrates audio/video, dedupes per kind, and normalizes against the documented fallback when history has no model", async () => {
     const transaction = await buildDesktopRecreateTransaction(
       {
         mediaClass: "video",
         promptData: prompt({
-          maybe_model_type: "removed-model",
+          maybe_model_type: null,
           maybe_positive_prompt: "restore me",
           maybe_context_images: [
             context("vid_ref", "video"),
@@ -170,7 +185,7 @@ describe("desktop Recreate transaction builder", () => {
 
     expect(transaction.mediaClass).toBe("video");
     if (transaction.mediaClass !== "video") throw new Error("unreachable");
-    expect(transaction.usedModelFallback).toBe(true);
+    expect(transaction.usedModelFallback).toBe(false);
     expect(transaction.targetModel.tauriId).toBe("fallback-video");
     expect(transaction.state).toMatchObject({
       prompt: "restore me",
@@ -249,6 +264,68 @@ describe("desktop Recreate transaction builder", () => {
     expect(transaction.mediaClass).toBe("video");
     if (transaction.mediaClass !== "video") throw new Error("unreachable");
     expect(transaction.state.aspectRatio).toBe("16:9");
+  });
+
+  it.each(["image", "video"] as const)(
+    "rejects an explicitly requested unavailable %s model",
+    async (mediaClass) => {
+      await expect(
+        buildDesktopRecreateTransaction(
+          {
+            mediaClass,
+            promptData: prompt({ maybe_model_type: "removed-model" }),
+          },
+          { imageModels: [imageModel()], videoModels: [videoModel()] },
+          hydration,
+        ),
+      ).rejects.toThrow("not available in this desktop build");
+    },
+  );
+
+  it("leaves stores untouched for an unavailable model and lets a newer valid Recreate commit", async () => {
+    const target = videoModel();
+    const setSelectedModel = vi.fn();
+    const commitImageRecreate = vi.fn();
+    const commitVideoRecreate = vi.fn();
+    vi.mocked(useModelsStore.getState).mockReturnValue({
+      loaded: true,
+      isLoading: false,
+      imageModels: [imageModel()],
+      videoModels: [target],
+      loadModelsFromBackend: vi.fn(),
+    } as unknown as ReturnType<typeof useModelsStore.getState>);
+    vi.mocked(useClassyModelSelectorStore.getState).mockReturnValue({
+      setSelectedModel,
+    } as unknown as ReturnType<typeof useClassyModelSelectorStore.getState>);
+    vi.mocked(usePromptImageStore.getState).mockReturnValue({
+      commitRecreate: commitImageRecreate,
+    } as unknown as ReturnType<typeof usePromptImageStore.getState>);
+    vi.mocked(usePromptVideoStore.getState).mockReturnValue({
+      commitRecreate: commitVideoRecreate,
+    } as unknown as ReturnType<typeof usePromptVideoStore.getState>);
+    vi.mocked(useTabStore.getState).mockReturnValue({
+      setActiveTab: vi.fn(),
+    } as unknown as ReturnType<typeof useTabStore.getState>);
+
+    await applyRecreateFromPromptData({
+      mediaClass: "video",
+      promptData: prompt({ maybe_model_type: "removed-model" }),
+    });
+
+    expect(setSelectedModel).not.toHaveBeenCalled();
+    expect(commitImageRecreate).not.toHaveBeenCalled();
+    expect(commitVideoRecreate).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith(
+      "The model used for this generation is not available in this desktop build.",
+    );
+
+    await applyRecreateFromPromptData({
+      mediaClass: "video",
+      promptData: prompt({ maybe_model_type: target.tauriId }),
+    });
+
+    expect(setSelectedModel).toHaveBeenCalledTimes(1);
+    expect(commitVideoRecreate).toHaveBeenCalledTimes(1);
   });
 
   it("rejects partial timed hydration that would rebind a prompt mention", async () => {

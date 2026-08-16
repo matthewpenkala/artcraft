@@ -57,6 +57,7 @@ import {
   toastMergeRefImagesOutcome,
 } from "../../lib/send-to-prompt";
 import { resolveModelOption } from "../../lib/resolve-model-setting";
+import { resolvePendingRecreateTargetModel } from "../../lib/pending-recreate-model";
 import {
   useOmniGenImageModels,
   OMNI_GENERATE_OUTAGE_MESSAGE,
@@ -333,21 +334,25 @@ export default function CreateImage() {
   // Consume a pending recreate payload (set by the lightbox Recreate button)
   // and populate the promptbox fields. Does NOT trigger generation. Subscribes
   // to the store so it fires even when the user is already on this route.
-  // Warn when a recreated generation's model is missing from the current
-  // model list: selectedModel silently falls back to the default model, and
-  // the restored prompt/settings may not be valid for it. Verified in its own
+  // Explicit model ids are exact: an unavailable model is refused before
+  // any fallback selection or prompt/store commit.
   const pendingRecreate = useCreateImageStore((s) => s.pendingRecreate);
   useEffect(() => {
     if (!pendingRecreate || apiModels.length === 0) return;
     const payload = pendingRecreate;
     if (useCreateImageStore.getState().pendingRecreate !== payload) return;
-    const requestedModel = payload.modelId
-      ? apiModels.find((model) => model.model === payload.modelId)
-      : undefined;
-    const targetModel =
-      requestedModel ??
-      apiModels.find((model) => model.model === DEFAULT_MODEL_ID) ??
-      apiModels[0];
+    const targetModel = resolvePendingRecreateTargetModel({
+      payload,
+      currentPending: useCreateImageStore.getState().pendingRecreate,
+      models: apiModels,
+      defaultModelId: DEFAULT_MODEL_ID,
+      onUnavailable: (modelId) => {
+        useCreateImageStore.getState().setPendingRecreate(null);
+        toast.error(
+          `The model "${modelId}" used for this generation is unavailable.`,
+        );
+      },
+    });
     if (!targetModel) return;
     const prepared = prepareMediaReferencesForSubmission(
       payload.referenceImages,
@@ -363,7 +368,7 @@ export default function CreateImage() {
       toast.error("Recreate references are incompatible with this model");
       return;
     }
-    const committed = useCreateImageStore.getState().commitPendingRecreate(
+    useCreateImageStore.getState().commitPendingRecreate(
       payload,
       {
         selectedModelId: targetModel.model,
@@ -390,11 +395,6 @@ export default function CreateImage() {
       },
       prepared,
     );
-    if (committed && payload.modelId && !requestedModel) {
-      toast.error(
-        "The model used for this generation isn't available anymore. Using the default model instead.",
-      );
-    }
   }, [pendingRecreate, apiModels]);
 
   // Consume reference images sent from the library ("Send to prompt").

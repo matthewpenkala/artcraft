@@ -25,6 +25,7 @@ import { GenerationCountPicker } from "./components/GenerationCountPicker";
 import { ResolutionPicker } from "./components/ResolutionPicker";
 import { QualityPicker } from "./components/QualityPicker";
 import { useImageCostEstimate } from "../../lib/cost-estimate-api";
+import { resolvePendingRecreateTargetModel } from "../../lib/pending-recreate-model";
 import { useOmniGenImageModels } from "@storyteller/omni-gen";
 import { getCreatorIconPathForModelId } from "@storyteller/model-list";
 import {
@@ -231,23 +232,25 @@ export default function CreateImage() {
   // Consume a pending recreate payload (set by the lightbox Recreate button)
   // and populate the promptbox fields. Does NOT trigger generation. Subscribes
   // to the store so it fires even when the user is already on this route.
-  // Warn when a recreated generation's model is missing from the current
-  // model list: selectedModel silently falls back to the default model, and
-  // the restored prompt/settings may not be valid for it. Verified in its own
-  // effect because the model list may still be loading when the recreate
-  // payload is consumed.
+  // Explicit model ids are exact: an unavailable model is refused before
+  // any fallback selection or prompt/store commit.
   const pendingRecreate = useCreateImageStore((s) => s.pendingRecreate);
   useEffect(() => {
     if (!pendingRecreate || apiModels.length === 0) return;
     const payload = pendingRecreate;
     if (useCreateImageStore.getState().pendingRecreate !== payload) return;
-    const requestedModel = payload.modelId
-      ? apiModels.find((model) => model.model === payload.modelId)
-      : undefined;
-    const targetModel =
-      requestedModel ??
-      apiModels.find((model) => model.model === DEFAULT_MODEL_ID) ??
-      apiModels[0];
+    const targetModel = resolvePendingRecreateTargetModel({
+      payload,
+      currentPending: useCreateImageStore.getState().pendingRecreate,
+      models: apiModels,
+      defaultModelId: DEFAULT_MODEL_ID,
+      onUnavailable: (modelId) => {
+        useCreateImageStore.getState().setPendingRecreate(null);
+        toast.error(
+          `The model "${modelId}" used for this generation is unavailable.`,
+        );
+      },
+    });
     if (!targetModel) return;
     const prepared = prepareMediaReferencesForSubmission(
       payload.referenceImages,
@@ -263,7 +266,7 @@ export default function CreateImage() {
       toast.error("Recreate references are incompatible with this model");
       return;
     }
-    const committed = useCreateImageStore.getState().commitPendingRecreate(
+    useCreateImageStore.getState().commitPendingRecreate(
       payload,
       {
         selectedModelId: targetModel.model,
@@ -290,11 +293,6 @@ export default function CreateImage() {
       },
       prepared,
     );
-    if (committed && payload.modelId && !requestedModel) {
-      toast.error(
-        "The model used for this generation isn't available anymore. Using the default model instead.",
-      );
-    }
   }, [pendingRecreate, apiModels]);
 
   // Resume polling for pending batches

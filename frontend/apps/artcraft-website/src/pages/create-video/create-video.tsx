@@ -47,6 +47,7 @@ import {
 } from "../create-image/components/AspectRatioIcon";
 import { GenerationCountPicker } from "../create-image/components/GenerationCountPicker";
 import { useVideoCostEstimate } from "../../lib/cost-estimate-api";
+import { resolvePendingRecreateTargetModel } from "../../lib/pending-recreate-model";
 import { useOmniGenVideoModels } from "@storyteller/omni-gen";
 import {
   effectivePromptMaxLength,
@@ -596,13 +597,18 @@ export default function CreateVideo() {
     if (!pendingRecreate || apiModels.length === 0) return;
     const payload = pendingRecreate;
     if (useCreateVideoStore.getState().pendingRecreate !== payload) return;
-    const requestedModel = payload.modelId
-      ? apiModels.find((model) => model.model === payload.modelId)
-      : undefined;
-    const rawTargetModel =
-      requestedModel ??
-      apiModels.find((model) => model.model === DEFAULT_MODEL_ID) ??
-      apiModels[0];
+    const rawTargetModel = resolvePendingRecreateTargetModel({
+      payload,
+      currentPending: useCreateVideoStore.getState().pendingRecreate,
+      models: apiModels,
+      defaultModelId: DEFAULT_MODEL_ID,
+      onUnavailable: (modelId) => {
+        useCreateVideoStore.getState().setPendingRecreate(null);
+        toast.error(
+          `The model "${modelId}" used for this generation is unavailable.`,
+        );
+      },
+    });
     if (!rawTargetModel) return;
     const targetModel =
       rawTargetModel.text_to_video_supported === false
@@ -695,7 +701,7 @@ export default function CreateVideo() {
       return;
     }
 
-    const committed = useCreateVideoStore.getState().commitPendingRecreate(
+    useCreateVideoStore.getState().commitPendingRecreate(
       payload,
       {
         selectedModelId: targetModel.model,
@@ -739,11 +745,6 @@ export default function CreateVideo() {
         referenceAudios: audios!,
       },
     );
-    if (committed && payload.modelId && !requestedModel) {
-      toast.error(
-        "The model used for this generation isn't available anymore. Using the default model instead.",
-      );
-    }
   }, [pendingRecreate, apiModels]);
 
   useEffect(() => {
