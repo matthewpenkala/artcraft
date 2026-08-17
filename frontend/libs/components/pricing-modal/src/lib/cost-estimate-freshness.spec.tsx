@@ -147,6 +147,7 @@ interface EstimateAdapter {
   inactivePage: ModelPage;
   estimate: Mock;
   useEstimate: EstimateHook;
+  debounceMs?: number;
 }
 
 function deferred<T>(): Deferred<T> {
@@ -166,6 +167,7 @@ const success = (credits: number): FakeEstimateResult => ({
 
 const model = (capabilityVersion = "first"): Model =>
   ({
+    kind: "video_model",
     id: "same-frontend-id",
     tauriId: "same-tauri-id",
     sizeOptions: [
@@ -203,6 +205,7 @@ const adapters: EstimateAdapter[] = [
     inactivePage: ModelPage.TextToImage,
     estimate: estimateApi.video,
     useEstimate: useVideoEstimateHarness,
+    debounceMs: 300,
   },
   {
     name: "splat",
@@ -232,6 +235,13 @@ async function rejectEstimate(
   await act(async () => {
     pending.reject(new Error("estimate failed"));
     await pending.promise.catch(() => undefined);
+  });
+}
+
+async function flushEstimateStart(adapter: EstimateAdapter): Promise<void> {
+  if (!adapter.debounceMs) return;
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, adapter.debounceMs));
   });
 }
 
@@ -275,6 +285,7 @@ describe.each(adapters)("$name cost-estimate freshness", (adapter) => {
     expect(result.current.isLoading).toBe(true);
     expect(creditsFor(adapter.page)).toBeNull();
 
+    await flushEstimateStart(adapter);
     unmount();
     await resolveEstimate(pending, success(10));
   });
@@ -290,7 +301,10 @@ describe.each(adapters)("$name cost-estimate freshness", (adapter) => {
       initialProps: { activePage: adapter.page, model: model("first") },
     });
 
+    await flushEstimateStart(adapter);
+
     rerender({ activePage: adapter.page, model: model("second") });
+    await flushEstimateStart(adapter);
 
     expect(adapter.estimate).toHaveBeenCalledTimes(2);
     expect(result.current.isLoading).toBe(true);
@@ -315,6 +329,7 @@ describe.each(adapters)("$name cost-estimate freshness", (adapter) => {
       initialProps: { activePage: adapter.page, model: model() },
     });
 
+    await flushEstimateStart(adapter);
     unmount();
     await resolveEstimate(pending, success(12));
 
@@ -328,6 +343,7 @@ describe.each(adapters)("$name cost-estimate freshness", (adapter) => {
       initialProps: { activePage: adapter.page, model: model() },
     });
 
+    await flushEstimateStart(adapter);
     await resolveEstimate(pending, success(7));
     expect(creditsFor(adapter.page)).toBe(7);
 
@@ -348,6 +364,7 @@ describe.each(adapters)("$name cost-estimate freshness", (adapter) => {
       initialProps,
     });
 
+    await flushEstimateStart(adapter);
     await resolveEstimate(pending, success(8));
     expect(creditsFor(adapter.page)).toBe(8);
 
@@ -368,6 +385,7 @@ describe.each(adapters)("$name cost-estimate freshness", (adapter) => {
       initialProps: { activePage: adapter.page, model: model() },
     });
 
+    await flushEstimateStart(adapter);
     rerender({ activePage: adapter.page, model: unsupportedModel });
 
     expect(result.current.isLoading).toBe(false);
@@ -386,6 +404,7 @@ describe.each(adapters)("$name cost-estimate freshness", (adapter) => {
       initialProps: { activePage: adapter.page, model: model() },
     });
 
+    await flushEstimateStart(adapter);
     await rejectEstimate(pending);
 
     expect(result.current.isLoading).toBe(false);
@@ -399,6 +418,7 @@ describe.each(adapters)("$name cost-estimate freshness", (adapter) => {
       initialProps: { activePage: adapter.page, model: model() },
     });
 
+    await flushEstimateStart(adapter);
     await resolveEstimate(pending, { status: "error", payload: {} });
 
     expect(result.current.isLoading).toBe(false);
